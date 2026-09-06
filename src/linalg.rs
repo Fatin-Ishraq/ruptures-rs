@@ -11,7 +11,8 @@ pub fn cholesky(a: &mut [f64], d: usize) -> bool {
                 s -= a[i * d + k] * a[j * d + k];
             }
             if i == j {
-                if !(s > 0.0) {
+                // Rejects zero, negative and NaN pivots alike.
+                if s.is_nan() || s <= 0.0 {
                     return false;
                 }
                 a[i * d + j] = s.sqrt();
@@ -153,10 +154,7 @@ pub fn median_inplace(buf: &mut [f64]) -> f64 {
     if n % 2 == 1 {
         upper
     } else {
-        let lower = buf[..mid]
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
+        let lower = buf[..mid].iter().copied().fold(f64::NEG_INFINITY, f64::max);
         0.5 * (lower + upper)
     }
 }

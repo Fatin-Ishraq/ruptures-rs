@@ -550,7 +550,7 @@ impl Cost for CostLstsq {
                 dot += beta[k] * rhs[k];
             }
             let rss = self.yty.seg(start, end, c) - dot;
-            total += if rss > 0.0 { rss } else { 0.0 };
+            total += rss.max(0.0);
         }
         total
     }
@@ -590,13 +590,7 @@ impl CostCLinear {
         let t1 = Prefix1::build(&sig, n, d);
         let t2 = Prefix1::build(&sq, n, d);
         let tw = Prefix1::build(&weighted, n, d);
-        Self {
-            sig,
-            t1,
-            t2,
-            tw,
-            d,
-        }
+        Self { sig, t1, t2, tw, d }
     }
 }
 

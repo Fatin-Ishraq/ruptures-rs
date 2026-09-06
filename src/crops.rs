@@ -26,13 +26,17 @@ use std::collections::HashMap;
 /// One optimal segmentation and the penalty interval it owns.
 pub type Segment = (f64, f64, Vec<usize>);
 
+/// PELT runs already performed, keyed by the penalty's bit pattern:
+/// `(n_segments, unpenalised cost, breakpoints)`.
+type Seen = HashMap<u64, (usize, f64, Vec<usize>)>;
+
 fn run(
     cost: &dyn Cost,
     n: usize,
     pen: f64,
     jump: usize,
     min_size: usize,
-    seen: &mut HashMap<u64, (usize, f64, Vec<usize>)>,
+    seen: &mut Seen,
 ) -> (usize, f64) {
     let key = pen.to_bits();
     if let Some((m, q, _)) = seen.get(&key) {
@@ -53,7 +57,7 @@ pub fn crops(
     jump: usize,
     min_size: usize,
 ) -> Vec<Segment> {
-    let mut seen: HashMap<u64, (usize, f64, Vec<usize>)> = HashMap::new();
+    let mut seen: Seen = HashMap::new();
 
     let (m_min, q_min) = run(cost, n, pen_min, jump, min_size, &mut seen);
     let (m_max, q_max) = run(cost, n, pen_max, jump, min_size, &mut seen);
@@ -90,10 +94,8 @@ pub fn crops(
             })
             .or_insert((q, bkps));
     }
-    let mut pts: Vec<(usize, f64, Vec<usize>)> = best
-        .into_iter()
-        .map(|(m, (q, b))| (m, q, b))
-        .collect();
+    let mut pts: Vec<(usize, f64, Vec<usize>)> =
+        best.into_iter().map(|(m, (q, b))| (m, q, b)).collect();
     pts.sort_by_key(|p| p.0);
 
     // Lower convex hull of (m, Q): only these are optimal for some penalty.
@@ -103,8 +105,8 @@ pub fn crops(
             let a = &hull[hull.len() - 2];
             let b = &hull[hull.len() - 1];
             // drop b if it sits on or above the segment a->p
-            let cross = (b.0 as f64 - a.0 as f64) * (p.1 - a.1)
-                - (p.0 as f64 - a.0 as f64) * (b.1 - a.1);
+            let cross =
+                (b.0 as f64 - a.0 as f64) * (p.1 - a.1) - (p.0 as f64 - a.0 as f64) * (b.1 - a.1);
             if cross <= 0.0 {
                 hull.pop();
             } else {

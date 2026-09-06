@@ -31,7 +31,10 @@ pub struct Neumaier {
 impl Neumaier {
     #[inline]
     pub fn new() -> Self {
-        Self { sum: 0.0, comp: 0.0 }
+        Self {
+            sum: 0.0,
+            comp: 0.0,
+        }
     }
 
     #[inline]
@@ -73,11 +76,6 @@ impl Prefix1 {
         Self { data, d }
     }
 
-    #[inline]
-    pub fn get(&self, i: usize, j: usize) -> f64 {
-        self.data[i * self.d + j]
-    }
-
     /// Sum of column `j` over rows `start..end`.
     #[inline]
     pub fn seg(&self, start: usize, end: usize, j: usize) -> f64 {
@@ -113,8 +111,8 @@ impl PrefixOuter {
     #[inline]
     pub fn seg_into(&self, start: usize, end: usize, out: &mut [f64]) {
         let (a, b) = (start * self.dd, end * self.dd);
-        for k in 0..self.dd {
-            out[k] = self.data[b + k] - self.data[a + k];
+        for (k, slot) in out.iter_mut().enumerate().take(self.dd) {
+            *slot = self.data[b + k] - self.data[a + k];
         }
     }
 }

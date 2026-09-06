@@ -187,7 +187,7 @@ impl CostEngine {
                 let p = order + 1;
                 let mut x = vec![0.0; n * p];
                 for i in 0..n {
-                    let base = if i < order { 0 } else { i - order };
+                    let base = i.saturating_sub(order);
                     for k in 0..order {
                         x[i * p + k] = sig.get(base + k).copied().unwrap_or(0.0);
                     }
@@ -243,8 +243,22 @@ impl CostEngine {
 }
 
 #[pyfunction]
-fn dynp(py: Python<'_>, engine: &CostEngine, n_bkps: usize, jump: usize, min_size: usize) -> Vec<usize> {
-    py.allow_threads(|| detect::dynp(engine.inner.as_ref(), engine.n_samples, n_bkps, jump, min_size))
+fn dynp(
+    py: Python<'_>,
+    engine: &CostEngine,
+    n_bkps: usize,
+    jump: usize,
+    min_size: usize,
+) -> Vec<usize> {
+    py.allow_threads(|| {
+        detect::dynp(
+            engine.inner.as_ref(),
+            engine.n_samples,
+            n_bkps,
+            jump,
+            min_size,
+        )
+    })
 }
 
 #[pyfunction]

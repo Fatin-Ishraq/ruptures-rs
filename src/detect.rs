@@ -153,8 +153,7 @@ pub fn pelt(cost: &dyn Cost, n: usize, pen: f64, jump: usize, min_size: usize) -
     let mut admissible: Vec<usize> = Vec::new();
 
     for &bkp in &ind {
-        let new_adm = ((bkp as isize - min_size as isize).div_euclid(jump as isize)
-            * jump as isize)
+        let new_adm = ((bkp as isize - min_size as isize).div_euclid(jump as isize) * jump as isize)
             .max(0) as usize;
         admissible.push(new_adm);
 
@@ -237,9 +236,8 @@ impl<'a> Binseg<'a> {
             let mut bkp = start;
             while bkp < end {
                 if bkp - start >= self.min_size && end - bkp >= self.min_size {
-                    let gain = segment_cost
-                        - self.cost.error(start, bkp)
-                        - self.cost.error(bkp, end);
+                    let gain =
+                        segment_cost - self.cost.error(start, bkp) - self.cost.error(bkp, end);
                     let cand = (gain, bkp);
                     best = match best {
                         None => Some(cand),
@@ -263,7 +261,12 @@ impl<'a> Binseg<'a> {
         out
     }
 
-    pub fn run(&mut self, n_bkps: Option<usize>, pen: Option<f64>, epsilon: Option<f64>) -> Vec<usize> {
+    pub fn run(
+        &mut self,
+        n_bkps: Option<usize>,
+        pen: Option<f64>,
+        epsilon: Option<f64>,
+    ) -> Vec<usize> {
         let mut bkps = vec![self.n];
         loop {
             let mut stop = true;
@@ -315,12 +318,21 @@ impl<'a> Binseg<'a> {
 
 // ------------------------------------------------------------------ BottomUp
 
+/// Identity of a segment node: `(start, end)`. `ruptures` hashes `Bnode` on
+/// exactly this pair, so merge candidates whose children were consumed can be
+/// recognised and discarded.
+type NodeId = (usize, usize);
+
+/// A merged node's provenance: which two children it came from, and their
+/// costs (needed for `gain`, which is `val - (left + right)`).
+type Children = (NodeId, NodeId, f64, f64);
+
 #[derive(Clone)]
 struct BNode {
     start: usize,
     end: usize,
     val: f64,
-    children: Option<((usize, usize), (usize, usize), f64, f64)>,
+    children: Option<Children>,
 }
 
 impl BNode {
@@ -518,7 +530,8 @@ fn argrelmax_wrap(data: &[f64], order: usize) -> Vec<usize> {
         for shift in 1..=order {
             let minus = ((i + m * order) - shift) % m;
             let plus = (i + shift) % m;
-            if !(data[i] > data[minus]) || !(data[i] > data[plus]) {
+            let strictly_greater = data[i] > data[minus] && data[i] > data[plus];
+            if !strictly_greater {
                 is_max = false;
                 break;
             }
@@ -555,6 +568,7 @@ pub fn window_score(
     (inds, score)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn window_seg(
     cost: &dyn Cost,
     n: usize,
@@ -575,10 +589,8 @@ pub fn window_seg(
         return bkps;
     }
     // sort ascending by (gain, index); the loop pops from the back
-    let mut ranked: Vec<(Ordf64, usize)> = peaks
-        .iter()
-        .map(|&p| (Ordf64(score[p]), inds[p]))
-        .collect();
+    let mut ranked: Vec<(Ordf64, usize)> =
+        peaks.iter().map(|&p| (Ordf64(score[p]), inds[p])).collect();
     ranked.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
     let mut peak_inds: Vec<usize> = ranked.into_iter().map(|(_, i)| i).collect();
 
