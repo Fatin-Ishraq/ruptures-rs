@@ -563,6 +563,12 @@ impl Cost for CostLstsq {
 /// `ruptures` builds the affine approximation explicitly and sums the squared
 /// residual, O(len). Expanding the square leaves only sums of `x`, `x^2` and
 /// `i * x`, so the whole thing collapses to O(d) prefix-sum arithmetic.
+///
+/// The expansion carries an `m * intercept^2` term, and the intercept is a raw
+/// signal value. On a signal offset far from zero that term dwarfs the residual
+/// it is part of, and the difference cancels away every significant digit. The
+/// cost is invariant under a shift (both the data and its affine approximation
+/// move together), so centring first is exact and removes the problem.
 pub struct CostCLinear {
     sig: Vec<f64>,
     t1: Prefix1,
@@ -573,6 +579,7 @@ pub struct CostCLinear {
 
 impl CostCLinear {
     pub fn new(sig: &[f64], n: usize, d: usize) -> Self {
+        let sig = center(sig, n, d);
         let sq: Vec<f64> = sig.iter().map(|v| v * v).collect();
         let mut weighted = vec![0.0; n * d];
         for i in 0..n {
@@ -580,11 +587,14 @@ impl CostCLinear {
                 weighted[i * d + j] = (i as f64) * sig[i * d + j];
             }
         }
+        let t1 = Prefix1::build(&sig, n, d);
+        let t2 = Prefix1::build(&sq, n, d);
+        let tw = Prefix1::build(&weighted, n, d);
         Self {
-            sig: sig.to_vec(),
-            t1: Prefix1::build(sig, n, d),
-            t2: Prefix1::build(&sq, n, d),
-            tw: Prefix1::build(&weighted, n, d),
+            sig,
+            t1,
+            t2,
+            tw,
             d,
         }
     }
