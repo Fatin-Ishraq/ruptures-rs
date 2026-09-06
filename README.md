@@ -12,18 +12,17 @@ Fast, drop-in change point detection for Python, powered by Rust.
 ```
 
 That is the whole migration. Same classes, same arguments, same breakpoints —
-verified by 759 tests that run both libraries on the same input and demand
+verified by 1,391 tests that run both libraries on the same input and demand
 *identical* output, not merely similar output.
 
 ```bash
 pip install ruptures-rs
 ```
 
-Supports **Python 3.10 through 3.14** from a single `abi3` wheel per platform.
-That matters more than it sounds: `ruptures` 1.1.10 declares
-`requires_python = "<3.14"` and ships no cp314 wheel, so on Python 3.14 `pip`
-falls back to 1.1.9 and compiles it from source — which needs a C toolchain,
-and fails without one. This installs as a prebuilt wheel.
+Supports **Python 3.10 through 3.14** from a single `abi3` wheel per platform,
+including musl. That matters more than it sounds: `ruptures` 1.1.9 ships no
+cp314 wheel, so on Python 3.14 `pip` compiles it from source — which needs a C
+toolchain, and fails without one. This installs as a prebuilt wheel.
 
 ## Why it is faster
 
@@ -35,9 +34,10 @@ them millions of times. `CostL2.error` is
 return self.signal[start:end].var(axis=0).sum() * (end - start)
 ```
 
-which is a NumPy call whose fixed dispatch overhead dwarfs its own arithmetic.
-A profile of `Dynp` on a 4,000-point signal spends 273 seconds making 7.9
-million of them.
+which is a NumPy call whose fixed dispatch overhead dwarfs its own arithmetic,
+and the dynamic program makes one at every cell of an O(n²K) table. On a
+4,000-point signal that is six minutes of wall clock, essentially all of it
+inside those calls.
 
 Nearly every one of these costs is a difference of prefix sums in disguise. With
 prefix sums of `x` and `x²`, the same value is a handful of scalar operations,
@@ -61,11 +61,10 @@ cost(a, b) = Σ_d [ S2[b] − S2[a] − (S1[b] − S1[a])² / (b − a) ]
 So the win is not only the constant factor from leaving Python. `Dynp` in
 `ruptures` is O(n²K) cells × O(len) per cell; here it is O(n²K) cells × O(1).
 
-In practice the measured speedup climbs with signal size and then settles:
-1,292x at n=500, 6,115x at n=4,000. Below a few thousand samples NumPy's fixed
-per-call overhead is what dominates the reference, and that part is a constant
-factor; the O(len) term only starts to bite once segments get long. Either way
-the effect is the same at the sizes people actually use.
+In practice the measured speedup climbs with signal size and then settles.
+Below a few thousand samples NumPy's fixed per-call overhead is what dominates
+the reference, and that part is a constant factor; the O(len) term only starts
+to bite once segments get long.
 
 `l1` is the honest exception: a per-segment median is not a prefix-summable
 statistic, so it stays O(len) and gains only the constant factor.
@@ -73,22 +72,23 @@ statistic, so it stays O(len) and gains only the constant factor.
 ## Benchmarks
 
 AMD Ryzen 5 5600G (6 cores), Python 3.14, `ruptures` 1.1.9. Every row was
-checked for identical breakpoints; `python bench/bench.py` reproduces the table.
+checked for identical breakpoints; `python bench/bench.py` reproduces the table
+and `bench/bench.log` is the run these numbers come from.
 
 ### Detectors
 
 | workload | `ruptures` | `ruptures-rs` | speedup |
 |---|---:|---:|---:|
-| `Dynp` l2, n=500, K=5, jump=1 | 2.20 s | 0.0017 s | **1,292x** |
-| `Dynp` l2, n=1,000 | 16.45 s | 0.0028 s | **5,886x** |
-| `Dynp` l2, n=2,000 | 62.93 s | 0.0106 s | **5,927x** |
-| `Dynp` l2, n=4,000 | 295.62 s | 0.0483 s | **6,115x** |
-| `Pelt` l2, n=1,000, pen=200, jump=1 | 1.74 s | 0.0114 s | 152x |
-| `Pelt` l2, n=5,000 | 38.02 s | 0.0670 s | 567x |
-| `Pelt` l2, n=20,000 | 722.52 s | 0.5417 s | **1,334x** |
-| `Binseg` l2, n=5,000, K=5, jump=1 | 0.493 s | 0.0056 s | 87x |
-| `Window` l2, n=5,000, width=100 | 0.189 s | 0.0022 s | 87x |
-| `BottomUp` l2, n=5,000, K=5, jump=1 | 0.033 s | 0.0019 s | 18x |
+| `Dynp` l2, n=500, K=5, jump=1 | 3.71 s | 0.0043 s | **863x** |
+| `Dynp` l2, n=1,000 | 16.96 s | 0.0047 s | **3,612x** |
+| `Dynp` l2, n=2,000 | 84.01 s | 0.0181 s | **4,640x** |
+| `Dynp` l2, n=4,000 | 370.11 s | 0.0829 s | **4,463x** |
+| `Pelt` l2, n=1,000, pen=200, jump=1 | 1.48 s | 0.0151 s | 98x |
+| `Pelt` l2, n=5,000 | 53.76 s | 0.0429 s | **1,253x** |
+| `Pelt` l2, n=20,000 | 916.28 s | 1.1200 s | **818x** |
+| `Binseg` l2, n=5,000, K=5, jump=1 | 1.12 s | 0.0009 s | **1,187x** |
+| `Window` l2, n=5,000, width=100 | 0.405 s | 0.0025 s | 161x |
+| `BottomUp` l2, n=5,000, K=5, jump=1 | 0.063 s | 0.0023 s | 28x |
 
 `BottomUp` gains least, and that is the expected result rather than a
 disappointment: most of its work is building the initial tree, which was never
@@ -100,20 +100,40 @@ the part dominated by cost evaluations.
 
 | model | `ruptures` | `ruptures-rs` | speedup |
 |---|---:|---:|---:|
-| `mahalanobis` | 6.65 s | 0.0032 s | **2,111x** |
-| `normal` | 1.23 s | 0.0019 s | 665x |
-| `rbf` | 6.43 s | 0.0249 s | 259x |
-| `rank` | 1.13 s | 0.0060 s | 189x |
-| `l1` | 6.13 s | 0.0424 s | 145x |
+| `mahalanobis` | 14.76 s | 0.0078 s | **1,890x** |
+| `normal` | 2.24 s | 0.0029 s | 783x |
+| `rank` | 2.19 s | 0.0028 s | 767x |
+| `rbf` | 13.49 s | 0.0409 s | 330x |
+| `linear` | 1.45 s | 0.0133 s | 110x |
+| `l1` | 2.80 s | 0.0593 s | 47x |
+| `ar` | 2.70 s | 0.0663 s | 41x |
 
-`l1` is last, as expected: it is the one cost that cannot become O(1).
+`l1` is near the bottom, as expected: it is the one cost that cannot become
+O(1). `linear` and `ar` are there for a different reason — each segment cost is
+a small least-squares solve, and the rank-revealing factorisation that keeps
+them agreeing with NumPy costs more than a plain Cholesky would.
+
+### Against C, not against NumPy
+
+`KernelCPD` is the one detector `ruptures` already implements as a C extension,
+so it is the honest measure of what the rewrite itself buys once the Python
+overhead is gone from both sides:
+
+| workload | `ruptures` (C) | `ruptures-rs` | speedup |
+|---|---:|---:|---:|
+| `KernelCPD` linear, n=2,000, K=5 | 0.028 s | 0.0137 s | 2x |
+| `KernelCPD` linear, n=10,000, K=5 | 0.887 s | 0.3354 s | 3x |
+
+A factor of two or three, which is roughly what one compiled implementation
+should beat another by. Everywhere else in this table the reference is paying
+NumPy dispatch, and that is where the thousands come from.
 
 ### Sizes the reference cannot reach
 
 | workload | `ruptures` | `ruptures-rs` |
 |---|---:|---:|
-| `Dynp` l2, n=20,000, K=5, jump=10 | infeasible | 0.023 s |
-| `Dynp` l2, n=50,000, K=5, jump=10 | infeasible | 0.086 s |
+| `Dynp` l2, n=20,000, K=5, jump=10 | infeasible | 0.028 s |
+| `Dynp` l2, n=50,000, K=5, jump=10 | infeasible | 0.111 s |
 
 Exact dynamic programming on a 50,000-point signal is not a workload `ruptures`
 can run — extrapolating its own curve puts it in the range of days, and its
@@ -124,10 +144,10 @@ the part that is a new capability rather than a faster one.
 
 | | time | segmentations found |
 |---|---:|---:|
-| `Crops`, n=2,000, penalties [1, 10000] | 0.018 s | 79 |
-| 50-point `ruptures` PELT grid, same range | 10.28 s | 22 |
+| `Crops`, n=2,000, penalties [1, 10000] | 0.028 s | 79 |
+| 50-point `ruptures` PELT grid, same range | 16.40 s | 22 |
 
-561x faster, and it finds the 57 regimes the grid steps over.
+587x faster, and it finds the 59 regimes the grid steps over.
 
 ## What `Crops` adds
 
@@ -152,7 +172,7 @@ could not justify picking — ignoring the two regimes at the ends of the range,
 whose width is an artefact of where you cut the range rather than evidence of
 stability. `examples/penalty_path.py` works through this.
 
-This is practical here only because PELT became cheap — running it a dozen times
+This is practical here only because PELT became cheap: running it a dozen times
 is worth doing once each run is fast.
 
 ## Accuracy
@@ -163,42 +183,145 @@ catastrophically when the mean dwarfs the spread. NumPy's `.var()` is two-pass
 and therefore safe, so a careless port silently disagrees with the reference —
 or returns negative variances.
 
-Two defences, applied together: the signal is centred by its per-dimension mean
-before any prefix array is built (every affected cost is invariant under that
-shift), and the arrays are accumulated with Neumaier compensation.
+Four defences, applied per cost according to what that cost is invariant under:
+
+- **Centring.** Every cost built on sums of squared deviations is invariant
+  under a per-column shift, so the signal is centred before any prefix array is
+  built. This covers `l2`, `l1`, `normal`, `mahalanobis` and `rank`.
+- **Detrending.** `clinear` compares a signal to a straight line, so it is
+  invariant under subtracting *any* affine function of the sample index.
+  Centring is not enough there — a trending signal is exactly what that cost is
+  for — so it is detrended by its global least-squares line.
+- **Pre-fitting.** `linear` and `ar` are invariant under removing any fixed
+  linear fit from the response, so the whole-signal fit is removed first. That
+  turns the final `yᵀy − β·Xᵀy` from a cancellation of two large numbers into
+  arithmetic on the residual itself.
+- **Compensated accumulation.** Prefix arrays use Neumaier summation, bounding
+  accumulation error at roughly one ulp regardless of `n`.
 
 The result is that this package is *more* accurate than the reference on
-ill-conditioned input, not less. On a signal offset by 1e9, checked against
-60-digit exact arithmetic:
+ill-conditioned input for the costs above. On a two-column signal offset by 1e9,
+checked against 60-digit exact arithmetic:
 
-| | exact | `ruptures` | `ruptures-rs` |
-|---|---|---|---|
-| `CostMl.error(23, 88)` | 21.30473705 | 24.0 | 21.30473705 |
+| | `CostMl.error(23, 88)` |
+|---|---:|
+| exact | 108.92015511 |
+| `ruptures` | 0.00000000 |
+| `ruptures-rs` | 108.92015511 |
 
-`tests/test_precision.py` asserts this against `decimal.Decimal`, so a
-regression in either direction is caught.
+`ruptures` builds this cost from a Gram matrix of raw values, and at that offset
+the subtraction that follows removes every significant digit it had.
+
+`tests/test_precision.py` asserts all of this against `decimal.Decimal`, so a
+regression in either direction is caught. It also pins the two costs that used
+to be worst here: `clinear` on a 20,000-point ramp went from 6e-3 relative error
+to 1e-11, and `ar` at an offset of 1e5 from 1.7e-2 to 2.8e-10.
 
 ## Correctness
 
 The whole project is only worth anything if the answers match, so that is what
 the suite tests.
 
-- **759 tests**, almost all differential against `ruptures` on the same input.
-- **440 randomised fuzz cases** over signal length, dimension, `jump`,
-  `min_size`, penalty, model and seed, asserting *exact* breakpoint equality.
-  This found two real defects during development.
+- **1,391 tests**, most of them differential against `ruptures` on the same
+  input.
+- **800 randomised fuzz cases** over signal length, dimension, `jump`,
+  `min_size`, penalty, model, stopping rule and seed, asserting *exact*
+  breakpoint equality — including `Window`, `epsilon` stopping, `linear`, `ar`,
+  `cosine` and `KernelCPD` in both of its modes.
 - **API coverage** is asserted mechanically: every public name in
   `dir(ruptures)` must exist here.
 - **CROPS** is validated against `ruptures`' own PELT — for every interval it
   reports, running the reference at a penalty inside that interval must
   reproduce exactly the segmentation CROPS attributed to it.
+- **Crash safety.** A Rust panic reaches Python as `PanicException`, which
+  inherits from `BaseException` and so slips past `except Exception`. Malformed
+  input used to trigger several. `tests/test_robustness.py` fires NaN, infinity,
+  out-of-range segments, `jump=0` and impossible allocations at every model and
+  detector, and fails if anything but an ordinary exception comes back.
 
-Tie-breaking is reproduced deliberately. `ruptures` relies on Python's `min`
-and `max` returning the *first* extremum; a Rust port using `Iterator::min_by`
+Tie-breaking is reproduced deliberately. `ruptures` relies on Python's `min` and
+`max` returning the *first* extremum, so a Rust port using `Iterator::min_by`
 (which returns the *last*) would quietly return different — though equally
-optimal — breakpoints. Two `ruptures` quirks are matched bug-for-bug, including
-PELT's positional `zip` of `admissible` against `subproblems`, because a
-drop-in that is merely defensible is not a drop-in.
+optimal — breakpoints. Python's `min` also keeps its first element when nothing
+compares less than it, which matters once a NaN is in play, so every search here
+seeds from the first candidate rather than from infinity. Several `ruptures`
+quirks are matched bug-for-bug, including PELT's positional `zip` of
+`admissible` against `subproblems`, because a drop-in that is merely defensible
+is not a drop-in.
+
+`KernelCPD` needed more than that. It is the one detector `ruptures` implements
+in C, and that C does not agree with `ruptures`' own Python cost classes: its
+cosine kernel has a unit diagonal where `scipy`'s `squareform` leaves a zero one
+— worth exactly one unit of penalty per segment, so asking for penalty `p` was
+solving the problem for `p − 1` — and its Gaussian exponent is clipped in single
+precision. Its penalised search also folds the penalty in and prunes differently
+from the Python `Pelt`. All of that is reproduced separately, so each detector
+here agrees with the `ruptures` code path it actually corresponds to.
+
+## Where the answers differ
+
+Stated precisely, because a drop-in that hides its gaps is worse than one that
+does not have them. Each of these is covered by a test that asserts the
+behaviour rather than hoping for it.
+
+- **Signals with exactly repeated values admit many equally-optimal
+  segmentations.** On a noiseless integer step signal, thousands of
+  segmentations have costs that differ only in the last few bits, and the two
+  libraries compute those bits differently — `ruptures` from a two-pass NumPy
+  reduction, this package from a difference of prefix sums. `tests/test_ties.py`
+  asserts the guarantee that survives: across every tied case it generates, the
+  exact detectors (`Dynp`, `Pelt`) never return a segmentation that costs more
+  than the reference's, scored with `ruptures`' own cost function. `Binseg` and
+  `BottomUp` are greedy and can land slightly either side. On data with any
+  noise in it, agreement is exact.
+- **`Window` can return a different number of breakpoints on such signals.**
+  Its peaks come from `argrelmax`, which needs a score strictly greater than
+  both neighbours; a noiseless signal makes the score curve flat over long
+  stretches, and whether a plateau counts as a peak is decided by the last bit
+  of a cost. The score *curves* agree to a few ulp — the test asserts that — so
+  this is peak-picking on tied data, not a disagreement about the costs.
+- **`linear` calls a design rank-deficient sooner than NumPy does.** Solving
+  through `XᵀX` squares the condition number, so a deficiency that shows in `X`
+  at 1e-17 shows in the normal equations at 1e-34, far below the floor at which
+  an eigenvalue means anything. The cutoff is therefore applied where it can be
+  resolved, which catches exact collinearity — where NumPy also reports no
+  residual — at the cost of also reporting no residual for a design whose
+  condition number exceeds roughly 1e7. Measured: the two agree at 1.4e6 and
+  this package reports no residual from 1.4e7 up. `ar` is unaffected — its
+  intercept column lets the design be centred first.
+- **The default Mahalanobis metric is an inverted covariance**, and
+  `numpy.linalg.inv` only raises on *exact* singularity. One rounding step short
+  of that it returns a matrix whose entries are pure cancellation, and every
+  cost built from it is noise — in `ruptures` too, which says nothing about it.
+  Every disagreement observed between the two libraries on this cost was on a
+  covariance in that state, so this package warns instead of staying quiet. On
+  well-conditioned data the two agree exactly across every case tried.
+- **`normal` with `add_small_diag=False` is meaningless on segments that are
+  constant to machine precision**, in both libraries, and they are meaningless
+  in different ways. `ruptures` added the small bias in v1.1.5 for exactly this
+  reason, and it is the default.
+- **`CostRank.error` returns a float**, where `ruptures` returns a 1x1 NumPy
+  array because it never collapses its matrix product. Arithmetic and
+  comparisons behave the same either way; code that indexed the result would
+  notice.
+- **`custom_cost` is not accelerated.** If you pass your own cost object, your
+  Python callable *is* the inner loop, and crossing an FFI boundary millions of
+  times to reach it would be slower than staying in Python. Those calls run on a
+  pure-Python implementation instead: same answers, original speed. Check
+  `estimator.accelerated` to see which path you are on.
+- **`l1` is only constant-factor faster.** The median is not prefix-summable.
+- **`rbf` and `cosine` need O(n²) memory**, the same as the dense Gram matrix
+  `ruptures` builds. Past ~23,000 samples this package raises an actionable
+  error instead of letting the allocator kill the process. The covariance costs
+  (`normal`, `mahalanobis`, `linear`, `ar`) keep `(n+1)·d²` doubles and are
+  guarded the same way, which is a limit `ruptures` does not have — it computes
+  those in O(n·d²).
+
+Where this package is deliberately stricter than the reference, it is because
+the alternative is a wrong answer rather than a different one: a segment index
+past the end of the signal raises instead of being silently clamped by NumPy
+slicing, `jump=0` is refused instead of dividing by zero three frames down, and
+`Dynp` raises rather than returning fewer breakpoints than you asked for.
 
 ## Coverage
 
@@ -209,8 +332,8 @@ Everything in `ruptures` 1.1.9:
 | **Detectors** | `Dynp`, `Pelt`, `Binseg`, `BottomUp`, `Window`, `KernelCPD` |
 | **Costs** | `l1`, `l2`, `normal`, `rbf`, `cosine`, `rank`, `mahalanobis`, `clinear`, `linear`, `ar` |
 | **Datasets** | `pw_constant`, `pw_linear`, `pw_normal`, `pw_wavy` |
-| **Metrics** | `precision_recall`, `hausdorff`, `randindex`, `meantime` |
-| **Also** | `display`, `cost_factory`, `BaseCost`, `BaseEstimator`, exceptions |
+| **Metrics** | `precision_recall`, `hausdorff`, `randindex`, `meantime`, `hamming` |
+| **Also** | `display`, `cost_factory`, `BaseCost`, `BaseEstimator`, `Bnode`, exceptions |
 | **New** | `Crops` |
 
 Datasets are ported verbatim, so the same `seed` gives the same signal — which
@@ -228,26 +351,10 @@ import ruptures as rpt  # this is now ruptures_rs
 ```
 
 It refuses rather than half-patching the module graph if the real `ruptures` has
-already been imported.
-
-## Limitations
-
-Stated plainly, because a drop-in that hides its gaps is worse than one that
-does not have them.
-
-- **`custom_cost` is not accelerated.** If you pass your own cost object, your
-  Python callable *is* the inner loop, and crossing an FFI boundary millions of
-  times to reach it would be slower than staying in Python. Those calls run on a
-  pure-Python implementation instead: same answers, original speed. Check
-  `estimator.accelerated` to see which path you are on.
-- **`l1` is only constant-factor faster.** The median is not prefix-summable.
-- **`rbf` and `cosine` need O(n²) memory**, the same as the dense Gram matrix
-  `ruptures` builds. Past ~23,000 samples this package raises an actionable
-  error instead of letting the allocator kill the process.
-- **Ties may resolve differently in principle.** Tie-breaking is reproduced
-  exactly, but where two segmentations have costs that differ only in the last
-  ulp, a different summation order could pick the other one. Both are optimal.
-  No case has been observed across 759 tests.
+already been imported. Leaf modules are aliased too, so
+`from ruptures.costs.costl2 import CostL2` resolves. What it cannot fake is
+distribution metadata: `importlib.metadata.version("ruptures")` still reports
+that no such distribution is installed, because none is.
 
 ## Development
 
@@ -255,6 +362,7 @@ does not have them.
 pip install maturin pytest numpy scipy ruptures
 maturin develop --release
 pytest tests/ -q
+cargo test
 python bench/bench.py
 ```
 

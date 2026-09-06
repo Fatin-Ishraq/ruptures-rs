@@ -10,13 +10,15 @@ accelerated by moving the loop across an FFI boundary.
 ``.accelerated`` reports which path an instance is on.
 """
 
+import operator
+
 import numpy as np
 
 from . import _fallback, _ruptures_rs
 from .base import BaseEstimator
-from .costs import cost_factory
-from .exceptions import BadSegmentationParameters
-from .utils import sanity_check
+from .costs import _RustCost, cost_factory
+from .exceptions import BadSegmentationParameters, NotEnoughPoints
+from .utils import as_index, sanity_check
 
 
 def _is_custom_cost(obj):
@@ -33,7 +35,6 @@ class _Detector(BaseEstimator):
     def __init__(self, model="l2", custom_cost=None, min_size=2, jump=5, params=None):
         if _is_custom_cost(custom_cost):
             self.cost = custom_cost
-            self.accelerated = False
         else:
             self.model_name = model
             self.cost = (
@@ -41,9 +42,15 @@ class _Detector(BaseEstimator):
                 if params is None
                 else cost_factory(model=model, **params)
             )
-            self.accelerated = True
-        self.min_size = max(min_size, self.cost.min_size)
-        self.jump = jump
+        # Decided by what the cost *is*, not by how it was named. `model=` can
+        # resolve to a user-defined `BaseCost` subclass, which has no engine
+        # behind it and has to take the pure-Python path like any other
+        # `custom_cost`.
+        self.accelerated = isinstance(self.cost, _RustCost)
+        self.min_size = max(as_index(min_size, "min_size"), self.cost.min_size)
+        self.jump = as_index(jump, "jump")
+        if self.jump < 1:
+            raise ValueError("jump must be at least 1, got {}".format(self.jump))
         self.n_samples = None
 
     def _fit(self, signal):
@@ -78,14 +85,13 @@ class Dynp(_Detector):
         return self._fit(signal)
 
     def predict(self, n_bkps):
+        n_bkps = operator.index(n_bkps)
+        if n_bkps < 0:
+            raise ValueError("n_bkps must not be negative, got {}".format(n_bkps))
         self._check(n_bkps)
         if self.accelerated:
-            return _ruptures_rs.dynp(
-                self._engine(), int(n_bkps), self.jump, self.min_size
-            )
-        return _fallback.dynp(
-            self.cost, self.n_samples, int(n_bkps), self.jump, self.min_size
-        )
+            return _ruptures_rs.dynp(self._engine(), n_bkps, self.jump, self.min_size)
+        return _fallback.dynp(self.cost, self.n_samples, n_bkps, self.jump, self.min_size)
 
     def fit_predict(self, signal, n_bkps):
         self.fit(signal)
@@ -101,9 +107,7 @@ class Pelt(_Detector):
     def predict(self, pen):
         self._check(0)
         if self.accelerated:
-            return _ruptures_rs.pelt(
-                self._engine(), float(pen), self.jump, self.min_size
-            )
+            return _ruptures_rs.pelt(self._engine(), float(pen), self.jump, self.min_size)
         return _fallback.pelt(
             self.cost, self.n_samples, float(pen), self.jump, self.min_size
         )
@@ -183,8 +187,8 @@ class Window(_Detector):
             params=params,
         )
         # `Window` does not raise `min_size` to the cost's own minimum.
-        self.min_size = min_size
-        self.width = 2 * (width // 2)
+        self.min_size = as_index(min_size, "min_size")
+        self.width = 2 * (as_index(width, "width") // 2)
         self.inds = None
         self.score = []
 
@@ -193,33 +197,45 @@ class Window(_Detector):
         self.signal = signal.reshape(-1, 1) if signal.ndim == 1 else signal
         self._fit(signal)
         if self.accelerated:
-            inds, score = _ruptures_rs.window_fit(
-                self._engine(), self.width, self.jump
-            )
-            self.inds = np.asarray(inds, dtype=int)
-            self.score = np.asarray(score, dtype=float)
-        else:
             w2 = self.width // 2
-            inds = np.arange(self.n_samples, step=self.jump)
-            inds = inds[(inds >= w2) & (inds < self.n_samples - w2)]
-            score = []
-            for k in inds:
-                start, end = k - w2, k + w2
-                gain = self.cost.error(start, end)
-                if gain == float("-inf"):
-                    score.append(0)
-                    continue
-                score.append(gain - (self.cost.error(start, k) + self.cost.error(k, end)))
-            self.inds = inds
-            self.score = np.array(score)
+            n = self.n_samples
+            has_windows = any(w2 <= k < n - w2 for k in range(0, n, self.jump))
+            # Each half-window is scored on its own, so a window narrower than
+            # twice the cost's minimum segment asks the cost for a segment it
+            # refuses to score. Every built-in `ruptures` cost raises
+            # `NotEnoughPoints` there; the compiled path would happily have
+            # computed a median of one point.
+            #
+            # Only on this path. A `custom_cost` scores through `_fallback`,
+            # where the user's own `error` decides whether a short segment is
+            # a problem — which is exactly what happens in `ruptures`, and it
+            # is not this layer's place to overrule it.
+            if has_windows and w2 < self.cost.min_size:
+                raise NotEnoughPoints
+            inds, score = _ruptures_rs.window_fit(self._engine(), self.width, self.jump)
+        else:
+            inds, score = _fallback.window_score(
+                self.cost, self.n_samples, self.width, self.jump
+            )
+        self.inds = np.asarray(inds, dtype=int)
+        self.score = np.asarray(score, dtype=float)
         return self
 
     def predict(self, n_bkps=None, pen=None, epsilon=None):
         self._check(0 if n_bkps is None else n_bkps)
         assert any(p is not None for p in (n_bkps, pen, epsilon)), "Give a parameter."
         if not self.accelerated:
-            raise NotImplementedError(
-                "Window with a custom_cost is not implemented; use the built-in models"
+            return _fallback.window_seg(
+                self.cost,
+                self.n_samples,
+                [int(i) for i in self.inds],
+                [float(s) for s in self.score],
+                self.width,
+                self.jump,
+                self.min_size,
+                n_bkps,
+                pen,
+                epsilon,
             )
         return _ruptures_rs.window_predict(
             self._engine(),
@@ -243,9 +259,17 @@ class KernelCPD(BaseEstimator):
 
     In `ruptures` this is the one detector already backed by a C extension —
     and it is 1,277x faster than the pure-Python `Dynp` on the same input,
-    which is the clearest possible evidence for compiling the rest. Here it is
-    the same exact dynamic program as `Dynp` with ``jump=1``, so the whole
-    library sits on one code path.
+    which is the clearest possible evidence for compiling the rest.
+
+    That C extension is *not* the same code as `ruptures`' own `CostRbf` and
+    `CostCosine`, and the two disagree. It evaluates the kernel on the diagonal
+    instead of taking the zero diagonal `scipy`'s `squareform` leaves behind, and
+    it clips the Gaussian exponent in single precision. A unit cosine diagonal
+    is worth exactly one unit of penalty per segment, so routing this detector
+    through the Python-flavoured cost changed which segmentation won. Here the
+    engine is built with the extension's kernel, and the penalised search is a
+    transcription of the extension's own PELT rather than of `ruptures`' Python
+    one, which associates its penalty differently and prunes differently.
     """
 
     _KERNEL_TO_MODEL = {"linear": "l2", "rbf": "rbf", "cosine": "cosine"}
@@ -260,7 +284,8 @@ class KernelCPD(BaseEstimator):
             if params is None
             else cost_factory(model=self.model_name, **params)
         )
-        self.min_size = max(min_size, self.cost.min_size)
+        self.cost._variant = "extension"
+        self.min_size = max(as_index(min_size, "min_size"), self.cost.min_size)
         self.jump = 1
         self.n_samples = None
         self.segmentations_dict = {}
@@ -285,12 +310,19 @@ class KernelCPD(BaseEstimator):
             assert n_bkps > 0, "The number of changes must be positive: {}".format(n_bkps)
             if n_bkps in self.segmentations_dict:
                 return self.segmentations_dict[n_bkps]
-            out = _ruptures_rs.dynp(self.cost._engine, n_bkps, 1, self.min_size)
-            self.segmentations_dict[n_bkps] = out
-            return out
+            # One dynamic program answers every k up to `n_bkps`, which is what
+            # the reference's path matrix gives it too — so the cache it
+            # advertises is actually populated.
+            out = _ruptures_rs.dynp_all(self.cost._engine, n_bkps, 1, self.min_size)
+            for k, bkps in enumerate(out, start=1):
+                if bkps is not None:
+                    self.segmentations_dict[k] = bkps
+            if n_bkps not in self.segmentations_dict:
+                raise BadSegmentationParameters
+            return self.segmentations_dict[n_bkps]
         if pen is not None:
             assert pen > 0, "The penalty must be positive: {}".format(pen)
-            return _ruptures_rs.pelt(self.cost._engine, float(pen), 1, self.min_size)
+            return _ruptures_rs.kernel_pelt(self.cost._engine, float(pen), self.min_size)
         raise AssertionError("Give a parameter.")
 
     def fit_predict(self, signal, n_bkps=None, pen=None):

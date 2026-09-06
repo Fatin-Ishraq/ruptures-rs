@@ -4,7 +4,9 @@
 //! tie-breaking rules, which are load-bearing: `ruptures` leans on Python's
 //! `min`/`max` returning the *first* extremum, so a Rust port that used
 //! `Iterator::max_by` (which returns the *last*) would silently produce
-//! different — though equally optimal — breakpoints.
+//! different — though equally optimal — breakpoints. Python's `min` also keeps
+//! the first element when it cannot be compared, which is why every search
+//! below seeds itself from the first candidate rather than from infinity.
 //!
 //! Where the shape of the computation is changed, it is changed without
 //! changing the answer:
@@ -14,9 +16,12 @@
 //!   whose insertion order is left to right, so the floating-point association
 //!   order is preserved.
 //! * `Pelt` keeps a scalar running total plus a back-pointer instead of copying
-//!   a whole partition dict per candidate.
+//!   a whole partition dict per candidate. The penalty is folded in per segment
+//!   — `total + (cost + pen)` — because that is how summing the dict's values
+//!   associates, and the alternative differs in the last ulp often enough to
+//!   move a breakpoint on signals with exact ties.
 
-use crate::cost::Cost;
+use crate::cost::{Cost, KernelBlocks};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
@@ -24,18 +29,30 @@ pub const INF: f64 = f64::INFINITY;
 
 /// Port of `ruptures.utils.sanity_check`.
 pub fn sanity_check(n_samples: usize, n_bkps: usize, jump: usize, min_size: usize) -> bool {
+    if jump == 0 {
+        return false;
+    }
     let n_adm_bkps = n_samples / jump;
     if n_bkps > n_adm_bkps {
         return false;
     }
     let ceil_div = min_size.div_ceil(jump);
-    if n_bkps * ceil_div * jump + min_size > n_samples {
-        return false;
+    match n_bkps
+        .checked_mul(ceil_div)
+        .and_then(|v| v.checked_mul(jump))
+        .and_then(|v| v.checked_add(min_size))
+    {
+        Some(need) => need <= n_samples,
+        None => false,
     }
-    true
 }
 
-/// Total ordering wrapper so floats can live in a `BinaryHeap`.
+/// Total ordering wrapper so floats can live in a sorted list or heap.
+///
+/// Backed by `f64::total_cmp`: `partial_cmp(..).unwrap_or(Equal)` looks
+/// harmless but is not transitive once a NaN is present, and Rust's sort
+/// detects the broken order and panics — straight through the FFI boundary,
+/// where it becomes a `BaseException` that user code cannot catch.
 #[derive(Clone, Copy, PartialEq)]
 struct Ordf64(f64);
 impl Eq for Ordf64 {}
@@ -46,13 +63,45 @@ impl PartialOrd for Ordf64 {
 }
 impl Ord for Ordf64 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .partial_cmp(&other.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        self.0.total_cmp(&other.0)
     }
 }
 
 // ------------------------------------------------------------------ Dynp
+
+/// Back-pointer tables from one bottom-up dynamic program.
+///
+/// Level `k - 1` holds, for every endpoint, the last breakpoint of the optimal
+/// `k`-breakpoint segmentation. Keeping every level means a single O(n^2 K)
+/// pass answers every `k <= n_bkps`, which is what `KernelCPD` needs to fill
+/// its `segmentations_dict`.
+pub struct DynpTables {
+    back: Vec<Vec<u32>>,
+    n: usize,
+}
+
+impl DynpTables {
+    /// Breakpoints of the optimal `k`-breakpoint segmentation, or `None` when
+    /// no admissible partition exists.
+    pub fn backtrack(&self, k: usize) -> Option<Vec<usize>> {
+        if k > self.back.len() {
+            return None;
+        }
+        let mut bkps = vec![self.n];
+        let mut pos = self.n;
+        for level in (0..k).rev() {
+            let b = self.back[level][pos];
+            if b == u32::MAX {
+                return None;
+            }
+            pos = b as usize;
+            bkps.push(pos);
+        }
+        bkps.sort_unstable();
+        bkps.dedup();
+        Some(bkps)
+    }
+}
 
 /// Exact segmentation by dynamic programming.
 ///
@@ -64,16 +113,29 @@ impl Ord for Ordf64 {
 ///
 /// Levels are computed in parallel across target positions; within a level the
 /// cells are independent given the previous one.
-pub fn dynp(cost: &dyn Cost, n: usize, n_bkps: usize, jump: usize, min_size: usize) -> Vec<usize> {
+pub fn dynp_tables(
+    cost: &dyn Cost,
+    n: usize,
+    n_bkps: usize,
+    jump: usize,
+    min_size: usize,
+) -> DynpTables {
     // Admissible breakpoint positions are the multiples of `jump` below `n`.
-    let cand: Vec<usize> = (0..n).step_by(jump).collect();
+    let cand: Vec<usize> = (0..n).step_by(jump.max(1)).collect();
     let mut targets = cand.clone();
     targets.push(n);
 
     let mut level: Vec<f64> = vec![INF; n + 1];
+    // Reachability is tracked separately from the value. Using `is_finite` on
+    // the value conflates "no partition exists here" with "the cost function
+    // legitimately returned -inf or NaN here", and `ruptures` admits both of
+    // those: a constant segment under `normal` with `add_small_diag=False` has
+    // a cost of exactly -inf, and it is frequently the optimum.
+    let mut computed: Vec<bool> = vec![false; n + 1];
     for &e in &targets {
         if e >= min_size {
             level[e] = cost.error(0, e);
+            computed[e] = true;
         }
     }
 
@@ -81,14 +143,15 @@ pub fn dynp(cost: &dyn Cost, n: usize, n_bkps: usize, jump: usize, min_size: usi
 
     for k in 1..=n_bkps {
         let prev = &level;
+        let prev_ok = &computed;
         // Only breakpoints that leave a feasible left subproblem are admissible.
         let adm: Vec<usize> = cand
             .iter()
             .copied()
-            .filter(|&b| sanity_check(b, k - 1, jump, min_size) && prev[b].is_finite())
+            .filter(|&b| sanity_check(b, k - 1, jump, min_size) && prev_ok[b])
             .collect();
 
-        let computed: Vec<(usize, f64, u32)> = targets
+        let computed_cells: Vec<(usize, f64, u32)> = targets
             .par_iter()
             .map(|&e| {
                 let mut best = INF;
@@ -97,9 +160,11 @@ pub fn dynp(cost: &dyn Cost, n: usize, n_bkps: usize, jump: usize, min_size: usi
                     if b >= e || e - b < min_size {
                         continue;
                     }
-                    // strict `<` keeps the FIRST minimum, matching Python's `min`
                     let v = prev[b] + cost.error(b, e);
-                    if v < best {
+                    // Seed from the first candidate, then take a strict
+                    // improvement: exactly Python's `min`, including when the
+                    // running best is a NaN that nothing compares less than.
+                    if arg == u32::MAX || v < best {
                         best = v;
                         arg = b as u32;
                     }
@@ -109,29 +174,32 @@ pub fn dynp(cost: &dyn Cost, n: usize, n_bkps: usize, jump: usize, min_size: usi
             .collect();
 
         let mut next = vec![INF; n + 1];
+        let mut next_ok = vec![false; n + 1];
         let mut bk = vec![u32::MAX; n + 1];
-        for (e, v, a) in computed {
-            next[e] = v;
+        for (e, v, a) in computed_cells {
+            if a != u32::MAX {
+                next[e] = v;
+                next_ok[e] = true;
+            }
             bk[e] = a;
         }
         level = next;
+        computed = next_ok;
         back.push(bk);
     }
 
-    // Backtrack.
-    let mut bkps = vec![n];
-    let mut pos = n;
-    for k in (0..n_bkps).rev() {
-        let b = back[k][pos];
-        if b == u32::MAX {
-            break;
-        }
-        pos = b as usize;
-        bkps.push(pos);
-    }
-    bkps.sort_unstable();
-    bkps.dedup();
-    bkps
+    DynpTables { back, n }
+}
+
+/// Convenience wrapper for a single `n_bkps`.
+pub fn dynp(
+    cost: &dyn Cost,
+    n: usize,
+    n_bkps: usize,
+    jump: usize,
+    min_size: usize,
+) -> Option<Vec<usize>> {
+    dynp_tables(cost, n, n_bkps, jump, min_size).backtrack(n_bkps)
 }
 
 // ------------------------------------------------------------------ Pelt
@@ -143,6 +211,7 @@ pub fn dynp(cost: &dyn Cost, n: usize, n_bkps: usize, jump: usize, min_size: usi
 /// partition, so the two can fall out of step. Reproducing that keeps the
 /// output identical rather than merely defensible.
 pub fn pelt(cost: &dyn Cost, n: usize, pen: f64, jump: usize, min_size: usize) -> Vec<usize> {
+    let jump = jump.max(1);
     let mut totals: HashMap<usize, f64> = HashMap::new();
     let mut prev: HashMap<usize, usize> = HashMap::new();
     totals.insert(0, 0.0);
@@ -150,18 +219,27 @@ pub fn pelt(cost: &dyn Cost, n: usize, pen: f64, jump: usize, min_size: usize) -
     let mut ind: Vec<usize> = (0..n).step_by(jump).filter(|&k| k >= min_size).collect();
     ind.push(n);
 
-    let mut admissible: Vec<usize> = Vec::new();
+    // Admissible positions are kept signed, because `floor((bkp - min_size) /
+    // jump) * jump` is negative when the signal is shorter than `min_size` and
+    // clamping that to zero would invent a partition `ruptures` does not have.
+    let mut admissible: Vec<isize> = Vec::new();
 
     for &bkp in &ind {
-        let new_adm = ((bkp as isize - min_size as isize).div_euclid(jump as isize) * jump as isize)
-            .max(0) as usize;
+        let new_adm = (bkp as isize - min_size as isize).div_euclid(jump as isize) * jump as isize;
         admissible.push(new_adm);
 
         // (total, t) for every admissible t that has a recorded partition
         let mut subproblems: Vec<(f64, usize)> = Vec::with_capacity(admissible.len());
         for &t in &admissible {
+            if t < 0 {
+                continue;
+            }
+            let t = t as usize;
             if let Some(&tot) = totals.get(&t) {
-                subproblems.push((tot + cost.error(t, bkp) + pen, t));
+                // `total + (cost + pen)`, matching how Python sums the
+                // partition dict: one `cost + pen` term per segment, added
+                // left to right.
+                subproblems.push((tot + (cost.error(t, bkp) + pen), t));
             }
         }
         if subproblems.is_empty() {
@@ -179,12 +257,13 @@ pub fn pelt(cost: &dyn Cost, n: usize, pen: f64, jump: usize, min_size: usize) -
 
         // pruning, zipped positionally exactly as ruptures does
         let cutoff = best.0 + pen;
-        admissible = admissible
-            .iter()
-            .zip(subproblems.iter())
-            .filter(|(_, sp)| sp.0 <= cutoff)
-            .map(|(t, _)| *t)
-            .collect();
+        let mut kept: Vec<isize> = Vec::with_capacity(admissible.len());
+        for (t, sp) in admissible.iter().zip(subproblems.iter()) {
+            if sp.0 <= cutoff {
+                kept.push(*t);
+            }
+        }
+        admissible = kept;
     }
 
     let mut bkps = Vec::new();
@@ -198,6 +277,76 @@ pub fn pelt(cost: &dyn Cost, n: usize, pen: f64, jump: usize, min_size: usize) -
     }
     bkps.sort_unstable();
     bkps.dedup();
+    bkps
+}
+
+// ------------------------------------------------- KernelCPD (C extension)
+
+/// Transcription of `ekcpd_pelt_compute` from `ruptures`' C extension.
+///
+/// The Python `Pelt` and this share an algorithm but not their arithmetic: the
+/// C version folds the penalty in as `(total + cost) + beta`, prunes a
+/// monotonically advancing prefix of candidates rather than filtering the whole
+/// list, and always keeps `s = 0` in play. Those choices pick different
+/// members of a tie, so `KernelCPD(...).predict(pen=...)` gets its own
+/// transcription instead of being routed through `pelt` above.
+pub fn kernel_pelt(kernel: &dyn KernelBlocks, n: usize, beta: f64, min_size: usize) -> Vec<usize> {
+    let mut m_v = vec![0.0f64; n + 1];
+    let mut m_path = vec![0usize; n + 1];
+    let mut m_pruning = vec![0.0f64; n + 1];
+    let mut s_min: usize = 0;
+
+    let seg_cost = |s: usize, t: usize| -> f64 {
+        kernel.diag_sum(s, t) - kernel.block_sum(s, t) / (t - s) as f64
+    };
+
+    // For t < 2 * min_size there cannot be any change point.
+    let head = std::cmp::min(2 * min_size, n + 1);
+    for (t, slot) in m_v.iter_mut().enumerate().take(head).skip(1) {
+        *slot = seg_cost(0, t) + beta;
+    }
+
+    for t in (2 * min_size)..=n {
+        let mut s = s_min;
+        let mut c_cost_sum = m_v[s] + seg_cost(s, t);
+        m_pruning[s] = c_cost_sum;
+        c_cost_sum += beta;
+        m_v[t] = c_cost_sum;
+        m_path[t] = s;
+
+        let upper = t - min_size + 1;
+        s = std::cmp::max(s_min + 1, min_size);
+        while s < upper {
+            let mut c_cost_sum = m_v[s] + seg_cost(s, t);
+            m_pruning[s] = c_cost_sum;
+            c_cost_sum += beta;
+            if m_v[t] > c_cost_sum {
+                m_v[t] = c_cost_sum;
+                m_path[t] = s;
+            }
+            s += 1;
+        }
+
+        while m_pruning[s_min] >= m_v[t] && s_min < upper {
+            if s_min == 0 {
+                s_min += min_size;
+            } else {
+                s_min += 1;
+            }
+        }
+    }
+
+    let mut bkps = Vec::new();
+    let mut ind = n;
+    while ind > 0 {
+        bkps.push(ind);
+        let next = m_path[ind];
+        if next >= ind {
+            break;
+        }
+        ind = next;
+    }
+    bkps.reverse();
     bkps
 }
 
@@ -216,7 +365,7 @@ impl<'a> Binseg<'a> {
         Self {
             cost,
             n,
-            jump,
+            jump: jump.max(1),
             min_size,
             cache: HashMap::new(),
         }
@@ -363,7 +512,7 @@ impl<'a> BottomUp<'a> {
         Self {
             cost,
             n,
-            jump,
+            jump: jump.max(1),
             min_size,
             merge_cache: HashMap::new(),
         }
@@ -551,7 +700,7 @@ pub fn window_score(
 ) -> (Vec<usize>, Vec<f64>) {
     let w2 = width / 2;
     let inds: Vec<usize> = (0..n)
-        .step_by(jump)
+        .step_by(jump.max(1))
         .filter(|&k| k >= w2 && k < n.saturating_sub(w2))
         .collect();
     let score: Vec<f64> = inds
@@ -581,6 +730,7 @@ pub fn window_seg(
     pen: Option<f64>,
     epsilon: Option<f64>,
 ) -> Vec<usize> {
+    let jump = jump.max(1);
     let mut bkps = vec![n];
     let mut error = cost.sum_of_costs(&bkps);
     let order = std::cmp::max(std::cmp::max(width, 2 * min_size) / (2 * jump), 1);
@@ -624,4 +774,68 @@ pub fn window_seg(
         error = cost.sum_of_costs(&bkps);
     }
     bkps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cost::CostL2;
+
+    fn step_signal() -> (Vec<f64>, usize) {
+        let mut sig = vec![0.0; 120];
+        for (i, v) in sig.iter_mut().enumerate() {
+            *v = if i < 60 { 0.0 } else { 5.0 };
+        }
+        (sig, 120)
+    }
+
+    #[test]
+    fn sanity_check_rejects_zero_jump_instead_of_dividing_by_it() {
+        assert!(!sanity_check(100, 1, 0, 2));
+        assert!(sanity_check(100, 1, 5, 2));
+    }
+
+    #[test]
+    fn dynp_finds_the_obvious_step() {
+        let (sig, n) = step_signal();
+        let cost = CostL2::new(&sig, n, 1);
+        let bkps = dynp(&cost, n, 1, 1, 2).expect("feasible");
+        assert_eq!(bkps, vec![60, 120]);
+    }
+
+    #[test]
+    fn dynp_reports_infeasibility_rather_than_a_short_answer() {
+        let (sig, n) = step_signal();
+        let cost = CostL2::new(&sig, n, 1);
+        // 40 breakpoints with min_size 10 cannot fit in 120 samples.
+        assert!(dynp(&cost, n, 40, 1, 10).is_none());
+    }
+
+    #[test]
+    fn dynp_tables_answer_every_smaller_k() {
+        let (sig, n) = step_signal();
+        let cost = CostL2::new(&sig, n, 1);
+        let tables = dynp_tables(&cost, n, 3, 1, 5);
+        for k in 1..=3 {
+            let bkps = tables.backtrack(k).expect("feasible");
+            assert_eq!(bkps.len(), k + 1);
+            assert_eq!(*bkps.last().unwrap(), n);
+        }
+    }
+
+    #[test]
+    fn pelt_recovers_the_step_at_a_moderate_penalty() {
+        let (sig, n) = step_signal();
+        let cost = CostL2::new(&sig, n, 1);
+        assert_eq!(pelt(&cost, n, 10.0, 1, 5), vec![60, 120]);
+    }
+
+    #[test]
+    fn argrelmax_wrap_matches_scipy_on_a_single_peak() {
+        let data = [0.0, 1.0, 5.0, 1.0, 0.0];
+        assert_eq!(argrelmax_wrap(&data, 1), vec![2]);
+        assert_eq!(argrelmax_wrap(&data, 2), vec![2]);
+        // A constant score has no strict maxima.
+        assert!(argrelmax_wrap(&[1.0, 1.0, 1.0], 1).is_empty());
+    }
 }

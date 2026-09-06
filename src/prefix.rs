@@ -7,13 +7,18 @@
 //! NumPy's `.var()` is two-pass and therefore stable, so a naive port silently
 //! disagrees with the reference — or returns negative variances.
 //!
-//! Two defences, applied together:
+//! Three defences, applied together:
 //!
 //! 1. **Centering.** The signal is shifted by its per-dimension global mean
 //!    before any prefix array is built. Sums of squared deviations are invariant
 //!    under this shift, so the answer is unchanged while the cancellation
 //!    becomes negligible for realistic data.
-//! 2. **Compensated accumulation.** Prefix arrays are built with Neumaier
+//! 2. **Detrending**, for the costs that are invariant under it. `clinear`
+//!    compares a signal to a straight line, so it is invariant under
+//!    subtracting *any* affine function of the sample index — and a trending
+//!    signal, which is the whole point of that cost, is not helped by centring
+//!    alone.
+//! 3. **Compensated accumulation.** Prefix arrays are built with Neumaier
 //!    summation, bounding accumulation error at roughly one ulp regardless of
 //!    `n`, instead of the O(n * eps) drift of a plain running sum.
 
@@ -85,6 +90,10 @@ impl Prefix1 {
 
 /// Prefix sums of the per-row outer products `x x^T`, stored as the full `d*d`
 /// block per row (redundant across the diagonal, but branch-free to index).
+///
+/// This is the crate's one quadratic-in-`d` structure: `(n + 1) * d^2` doubles.
+/// Callers are expected to have checked that against a memory budget first —
+/// see `check_outer_memory` in the binding layer.
 pub struct PrefixOuter {
     data: Vec<f64>,
     dd: usize,
@@ -117,24 +126,73 @@ impl PrefixOuter {
     }
 }
 
+/// Per-column means of a row-major `n x d` matrix, compensated.
+pub fn column_means(sig: &[f64], n: usize, d: usize) -> Vec<f64> {
+    let mut out = vec![0.0; d];
+    if n == 0 {
+        return out;
+    }
+    for (j, slot) in out.iter_mut().enumerate() {
+        let mut acc = Neumaier::new();
+        for i in 0..n {
+            acc.add(sig[i * d + j]);
+        }
+        *slot = acc.value() / n as f64;
+    }
+    out
+}
+
+/// Subtract a per-column offset from a row-major `n x d` matrix.
+pub fn subtract_means(sig: &[f64], n: usize, d: usize, means: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0; n * d];
+    for i in 0..n {
+        for j in 0..d {
+            out[i * d + j] = sig[i * d + j] - means[j];
+        }
+    }
+    out
+}
+
 /// Centre a row-major `n x d` signal by its per-column mean.
 ///
 /// Returns the centred copy. Sums of squared deviations, covariances and
 /// least-squares residuals are all invariant under this shift, so it costs
 /// nothing but removes the dominant source of cancellation.
 pub fn center(sig: &[f64], n: usize, d: usize) -> Vec<f64> {
-    let mut means = vec![0.0; d];
-    for j in 0..d {
-        let mut acc = Neumaier::new();
-        for i in 0..n {
-            acc.add(sig[i * d + j]);
-        }
-        means[j] = acc.value() / n as f64;
-    }
+    subtract_means(sig, n, d, &column_means(sig, n, d))
+}
+
+/// Subtract the per-column global least-squares line in the sample index.
+///
+/// For a cost that compares the signal to an affine function of the index —
+/// `clinear` — the residual is unchanged by this, because the data and its
+/// approximation move together. Centring is the special case where the fitted
+/// slope is zero, and it is not enough on a trending signal: the values still
+/// grow without bound along the segment, and the expanded O(1) form then
+/// cancels a large `m * intercept^2` term against the rest.
+pub fn detrend_affine(sig: &[f64], n: usize, d: usize) -> Vec<f64> {
     let mut out = vec![0.0; n * d];
-    for i in 0..n {
-        for j in 0..d {
-            out[i * d + j] = sig[i * d + j] - means[j];
+    if n == 0 {
+        return out;
+    }
+    let nf = n as f64;
+    let mean_i = (nf - 1.0) / 2.0;
+    // sum (i - mean_i)^2 for i in 0..n
+    let sii = nf * (nf * nf - 1.0) / 12.0;
+    let means = column_means(sig, n, d);
+    for (j, &mean_x) in means.iter().enumerate() {
+        let slope = if sii > 0.0 {
+            let mut cross = Neumaier::new();
+            for i in 0..n {
+                cross.add((i as f64 - mean_i) * (sig[i * d + j] - mean_x));
+            }
+            cross.value() / sii
+        } else {
+            0.0
+        };
+        let intercept = mean_x - slope * mean_i;
+        for i in 0..n {
+            out[i * d + j] = sig[i * d + j] - (slope * i as f64 + intercept);
         }
     }
     out
@@ -173,5 +231,44 @@ impl Cumsum2 {
     pub fn rect(&self, a: usize, b: usize) -> f64 {
         let s = self.stride;
         self.data[b * s + b] - self.data[a * s + b] - self.data[b * s + a] + self.data[a * s + a]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn neumaier_beats_naive_summation() {
+        let mut acc = Neumaier::new();
+        acc.add(1.0);
+        for _ in 0..10_000 {
+            acc.add(1e-16);
+        }
+        assert!(acc.value() > 1.0);
+    }
+
+    #[test]
+    fn detrend_flattens_a_ramp() {
+        let n = 500;
+        let sig: Vec<f64> = (0..n).map(|i| 7.0 * i as f64 - 3.0).collect();
+        let out = detrend_affine(&sig, n, 1);
+        assert!(out.iter().all(|v| v.abs() < 1e-9), "ramp not removed");
+    }
+
+    #[test]
+    fn detrend_is_centering_on_a_flat_signal() {
+        let sig = vec![4.0; 32];
+        let out = detrend_affine(&sig, 32, 1);
+        assert!(out.iter().all(|v| v.abs() < 1e-12));
+    }
+
+    #[test]
+    fn cumsum2_block_sums() {
+        // K[i][j] = i + j over a 4x4 grid.
+        let c = Cumsum2::build(4, |i, j| (i + j) as f64);
+        // block [1,3) x [1,3) = (1+1)+(1+2)+(2+1)+(2+2) = 12
+        assert_eq!(c.rect(1, 3), 12.0);
+        assert_eq!(c.rect(0, 0), 0.0);
     }
 }

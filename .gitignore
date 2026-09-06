@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 *.so
 *.pyd
+# MSVC debug symbols, dropped next to the extension by `maturin develop`
+*.pdb
 .venv/
 dist/
 *.egg-info/

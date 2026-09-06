@@ -27,6 +27,15 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
 
+  rust-tests:
+    # The Rust unit tests cover what the Python suite cannot reach directly:
+    # NaN-safe ordering, the rank rule, detrending, and the kernel flavours.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - run: cargo test --release
+
   test:
     name: test ${{ matrix.os }} / py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
@@ -34,11 +43,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        # 3.14 is included deliberately: `ruptures` declares
-        # requires_python "<3.14" and ships no cp314 wheel, so it cannot be
-        # installed there. One abi3-py310 wheel covers 3.10 onward, so this
-        # package works on 3.14 anyway - and this matrix entry is what proves
-        # it rather than asserting it.
+        # 3.14 is included deliberately: `ruptures` 1.1.9 ships no cp314 wheel,
+        # so it cannot be installed there without a C toolchain. One abi3-py310
+        # wheel covers 3.10 onward, so this package works on 3.14 anyway - and
+        # this matrix entry is what proves it rather than asserting it.
         python: ["3.10", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +68,7 @@ jobs:
         # Most tests are differential against `ruptures`. Where it cannot be
         # installed the suite skips those and still runs everything that
         # validates this package on its own - precision against exact
-        # arithmetic, the install shim, the API surface, the memory guard.
+        # arithmetic, the install shim, the API surface, the crash guards.
         # A missing reference must not fail a build.
         run: |
           pip install scipy "ruptures>=1.1.9" || echo "::warning::reference unavailable here; differential tests will skip"
@@ -69,8 +77,32 @@ jobs:
         shell: bash
         run: pytest tests/ -q -rs
 
+  sdist-install:
+    # The wheels are what users get; the sdist is what they fall back to on a
+    # platform with no wheel. Building one is not the same as installing it,
+    # and only installing it proves the crate compiles from the packaged
+    # sources rather than from the checkout.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: Install from the sdist and import it
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy
+          pip install --no-binary ruptures-rs dist/*.tar.gz
+          cd /
+          python -c "import ruptures_rs as rpt; s, _ = rpt.pw_constant(300, 1, 3, noise_std=2, seed=1); print(rpt.Dynp(model='l2').fit(s).predict(3))"
+
   wheels:
-    name: wheels ${{ matrix.platform.os }} ${{ matrix.platform.target }}
+    name: wheels ${{ matrix.platform.os }} ${{ matrix.platform.target }} ${{ matrix.platform.manylinux }}
     # Wheels for every platform are the whole point of a drop-in replacement:
     # if `pip install` has to compile, trying it is no longer free.
     runs-on: ${{ matrix.platform.os }}
@@ -78,11 +110,16 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { os: ubuntu-latest, target: x86_64 }
-          - { os: ubuntu-latest, target: aarch64 }
-          - { os: windows-latest, target: x64 }
-          - { os: macos-latest, target: x86_64 }
-          - { os: macos-latest, target: aarch64 }
+          - { os: ubuntu-latest, target: x86_64, manylinux: auto }
+          - { os: ubuntu-latest, target: aarch64, manylinux: auto }
+          # musl wheels matter more than their share of users suggests: Alpine
+          # is the default base image for a lot of containers, and without one
+          # `pip install` there falls back to compiling the crate.
+          - { os: ubuntu-latest, target: x86_64, manylinux: musllinux_1_2 }
+          - { os: ubuntu-latest, target: aarch64, manylinux: musllinux_1_2 }
+          - { os: windows-latest, target: x64, manylinux: auto }
+          - { os: macos-latest, target: x86_64, manylinux: auto }
+          - { os: macos-latest, target: aarch64, manylinux: auto }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -93,10 +130,10 @@ jobs:
           target: ${{ matrix.platform.target }}
           # abi3-py310: one wheel per platform covers 3.10 through 3.14+
           args: --release --out dist
-          manylinux: auto
+          manylinux: ${{ matrix.platform.manylinux }}
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}-${{ matrix.platform.manylinux }}
           path: dist
 
   sdist:
@@ -114,7 +151,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, test, wheels, sdist]
+    needs: [lint, rust-tests, test, sdist-install, wheels, sdist]
     runs-on: ubuntu-latest
     environment: release
     permissions:

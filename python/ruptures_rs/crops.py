@@ -25,6 +25,8 @@ import numpy as np
 
 from . import _ruptures_rs
 from .costs import cost_factory
+from .exceptions import BadSegmentationParameters
+from .utils import as_index, sanity_check
 
 
 class PenaltyRegime(NamedTuple):
@@ -52,8 +54,10 @@ class Crops:
         self.cost = (
             cost_factory(model=model) if params is None else cost_factory(model=model, **params)
         )
-        self.min_size = max(min_size, self.cost.min_size)
-        self.jump = jump
+        self.min_size = max(as_index(min_size, "min_size"), self.cost.min_size)
+        self.jump = as_index(jump, "jump")
+        if self.jump < 1:
+            raise ValueError("jump must be at least 1, got {}".format(self.jump))
         self.n_samples = None
 
     def fit(self, signal) -> "Crops":
@@ -71,6 +75,17 @@ class Crops:
             raise ValueError("pen_min must be positive")
         if not pen_max > pen_min:
             raise ValueError("pen_max must exceed pen_min")
+        # Same guard the penalised detectors apply. Without it a signal shorter
+        # than `min_size` came back as a single regime covering the whole
+        # penalty range, which reads as a real answer rather than as "these
+        # parameters admit no segmentation".
+        if not sanity_check(
+            n_samples=self.cost.signal.shape[0],
+            n_bkps=0,
+            jump=self.jump,
+            min_size=self.min_size,
+        ):
+            raise BadSegmentationParameters
         raw: List[Tuple[float, float, List[int]]] = _ruptures_rs.crops(
             self.cost._engine, float(pen_min), float(pen_max), self.jump, self.min_size
         )

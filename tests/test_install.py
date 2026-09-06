@@ -65,7 +65,9 @@ def test_install_redirects_submodules():
     ).splitlines()
     assert out[0] == "[120, 185, 240, 300]"
     assert out[1] == "425.508667"
-    assert out[2] == "2"
+    # `ruptures` computes this with `scipy.spatial.distance.cdist`, so the
+    # distance comes back as a float. Matching that is the point.
+    assert out[2] == "2.0"
 
 
 def test_install_produces_accelerated_estimators():

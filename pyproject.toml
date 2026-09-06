@@ -11,19 +11,44 @@ license = { file = "LICENSE" }
 authors = [{ name = "Fatin Ishraq" }]
 keywords = ["change point detection", "time series", "segmentation", "rust"]
 classifiers = [
+  "Development Status :: 4 - Beta",
   "Programming Language :: Rust",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
   "License :: OSI Approved :: BSD License",
   "Intended Audience :: Science/Research",
   "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Typing :: Typed",
 ]
 dependencies = ["numpy>=1.22"]
 dynamic = ["version"]
 
+[project.urls]
+Homepage = "https://github.com/Fatin-Ishraq/ruptures-rs"
+Repository = "https://github.com/Fatin-Ishraq/ruptures-rs"
+Issues = "https://github.com/Fatin-Ishraq/ruptures-rs/issues"
+Changelog = "https://github.com/Fatin-Ishraq/ruptures-rs/blob/main/CHANGELOG.md"
+"Reference implementation" = "https://github.com/deepcharles/ruptures"
+
 [project.optional-dependencies]
 test = ["pytest", "ruptures>=1.1.9", "scipy"]
+plot = ["matplotlib"]
 
 [tool.maturin]
 python-source = "python"
 module-name = "ruptures_rs._ruptures_rs"
 features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+  # `ruptures` warns on every `CostNormal` construction; it is not this
+  # package's warning and it drowns everything else.
+  "ignore:New behaviour in v1.1.5:UserWarning",
+]

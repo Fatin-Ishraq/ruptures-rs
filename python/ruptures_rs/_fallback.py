@@ -213,3 +213,82 @@ def bottomup(cost, n_samples, jump, min_size, n_bkps=None, pen=None, epsilon=Non
                 cand = merge(leaf, leaves[left_idx + 1])
                 heapq.heappush(merged, (cand.gain, cand))
     return sorted(leaf.end for leaf in leaves)
+
+
+def _argrelmax_wrap(data, order):
+    """`scipy.signal.argrelmax(data, order=order, mode="wrap")`.
+
+    Reimplemented rather than imported so the fallback path does not drag in
+    `scipy`, which this package does not otherwise need.
+    """
+    m = len(data)
+    if m == 0:
+        return []
+    out = []
+    for i in range(m):
+        keep = True
+        for shift in range(1, order + 1):
+            minus = (i + m * order - shift) % m
+            plus = (i + shift) % m
+            if not (data[i] > data[minus] and data[i] > data[plus]):
+                keep = False
+                break
+        if keep:
+            out.append(i)
+    return out
+
+
+def window_score(cost, n_samples, width, jump):
+    w2 = width // 2
+    inds = [k for k in range(0, n_samples, jump) if w2 <= k < n_samples - w2]
+    score = []
+    for k in inds:
+        start, end = k - w2, k + w2
+        gain = cost.error(start, end)
+        if gain == float("-inf"):
+            score.append(0)
+            continue
+        score.append(gain - (cost.error(start, k) + cost.error(k, end)))
+    return inds, score
+
+
+def window_seg(
+    cost,
+    n_samples,
+    inds,
+    score,
+    width,
+    jump,
+    min_size,
+    n_bkps=None,
+    pen=None,
+    epsilon=None,
+):
+    bkps = [n_samples]
+    error = cost.sum_of_costs(bkps)
+    order = max(max(width, 2 * min_size) // (2 * jump), 1)
+    peaks = _argrelmax_wrap(score, order)
+    if not peaks:
+        return bkps
+    peak_inds = [i for _, i in sorted((score[p], inds[p]) for p in peaks)]
+    stop = False
+    while not stop:
+        stop = True
+        try:
+            bkp = peak_inds.pop()
+        except IndexError:
+            break
+        if n_bkps is not None:
+            if len(bkps) - 1 < n_bkps:
+                stop = False
+        elif pen is not None:
+            if error - cost.sum_of_costs(sorted([bkp] + bkps)) > pen:
+                stop = False
+        elif epsilon is not None:
+            if error > epsilon:
+                stop = False
+        if not stop:
+            bkps.append(bkp)
+            bkps.sort()
+            error = cost.sum_of_costs(bkps)
+    return bkps
