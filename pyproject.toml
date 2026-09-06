@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ruptures-rs"
+requires-python = ">=3.10"
+description = "Fast, drop-in change point detection for Python, powered by Rust"
+readme = "README.md"
+license = { text = "BSD-2-Clause" }
+authors = [{ name = "Fatin Ishraq" }]
+keywords = ["change point detection", "time series", "segmentation", "rust"]
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: BSD License",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = ["numpy>=1.22"]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+test = ["pytest", "ruptures>=1.1.9", "scipy"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "ruptures_rs._ruptures_rs"
+features = ["pyo3/extension-module"]

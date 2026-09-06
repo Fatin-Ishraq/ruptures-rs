@@ -1,0 +1,24 @@
+[package]
+name = "ruptures-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Fast, drop-in change point detection for Python, powered by Rust"
+license = "BSD-2-Clause"
+repository = "https://github.com/Fatin-Ishraq/ruptures-rs"
+
+[lib]
+name = "_ruptures_rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+numpy = "0.23"
+ndarray = "0.16"
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
