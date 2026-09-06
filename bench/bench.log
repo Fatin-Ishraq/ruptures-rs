@@ -4,3 +4,22 @@ case                                       ruptures  ruptures-rs     speedup   m
 Dynp l2  n=500 K=5 jump=1                    2.202s      0.0017s      1,292x   yes
 Dynp l2  n=1,000 K=5 jump=1                 16.454s      0.0028s      5,886x   yes
 Dynp l2  n=2,000 K=5 jump=1                 62.930s      0.0106s      5,927x   yes
+Dynp l2  n=4,000 K=5 jump=1                295.621s      0.0483s      6,115x   yes
+Dynp l2  n=20,000 K=5 jump=10                   n/a      0.0230s         n/a   -
+Dynp l2  n=50,000 K=5 jump=10                   n/a      0.0863s         n/a   -
+Pelt l2  n=1,000 pen=200 jump=1              1.736s      0.0114s        152x   yes
+Pelt l2  n=5,000 pen=200 jump=1             38.016s      0.0670s        567x   yes
+Pelt l2  n=20,000 pen=200 jump=1           722.522s      0.5417s      1,334x   yes
+Binseg l2  n=5,000 K=5 jump=1                0.493s      0.0056s         87x   yes
+BottomUp l2  n=5,000 K=5 jump=1              0.033s      0.0019s         18x   yes
+Window l2  n=5,000 width=100 jump=1          0.189s      0.0022s         87x   yes
+Dynp l1  n=1,500 K=4 jump=5                  6.126s      0.0424s        145x   yes
+Dynp normal  n=1,500 K=4 jump=5              1.230s      0.0019s        665x   yes
+Dynp rank  n=1,500 K=4 jump=5                1.128s      0.0060s        189x   yes
+Dynp mahalanobis  n=1,500 K=4 jump=5         6.652s      0.0032s      2,111x   yes
+Dynp rbf  n=1,500 K=4 jump=5                 6.430s      0.0249s        259x   yes
+------------------------------------------------------------------------------------
+CROPS  n=2,000, penalties [1, 10000]: 79 distinct segmentations in 0.0183s
+  50-point ruptures grid over the same range: 10.281s, 22 distinct segmentations (561x slower, 59 regimes missed)
+------------------------------------------------------------------------------------
+all 15 compared cases returned identical breakpoints

@@ -66,7 +66,7 @@ fn check_kernel_memory(n: usize, model: &str) -> PyResult<()> {
     let needed = (n + 1).saturating_mul(n + 1).saturating_mul(8);
     if needed > LIMIT_BYTES {
         return Err(PyValueError::new_err(format!(
-            "the `{model}` model needs a {n}x{n} kernel table ({:.1} GiB) for a signal of              {n} samples, over the {:.0} GiB limit. Subsample the signal, or use a              non-kernel model such as `l2` or `normal`, which need no quadratic memory.",
+            "the `{model}` model needs a kernel table of {n}x{n} ({:.1} GiB), over the {:.0} GiB limit. Subsample the signal, or use a non-kernel model such as `l2` or `normal`, which need no quadratic memory.",
             needed as f64 / (1u64 << 30) as f64,
             LIMIT_BYTES as f64 / (1u64 << 30) as f64,
         )));

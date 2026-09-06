@@ -232,6 +232,22 @@ def test_unknown_model():
         rpt_rs.cost_factory(model="nope")
 
 
+def test_kernel_memory_guard():
+    """A clear refusal beats an OOM kill.
+
+    Kernel costs need an (n+1)^2 table - the same quadratic memory `ruptures`
+    spends on its dense Gram matrix, where the failure mode is the allocator
+    killing the process.
+    """
+    huge = np.zeros((30_000, 1))
+    with pytest.raises(ValueError, match="kernel table"):
+        rpt_rs.CostRbf().fit(huge)
+    with pytest.raises(ValueError, match="kernel table"):
+        rpt_rs.CostCosine().fit(huge)
+    # non-kernel models have no such limit
+    assert rpt_rs.CostL2().fit(huge).error(0, 30_000) == 0.0
+
+
 # ---------------------------------------------------------------- custom cost
 
 
