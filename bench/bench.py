@@ -8,6 +8,10 @@ Sizes are chosen so the *reference* can finish. Where it cannot, the row is
 marked `n/a` and only this package's time is shown; those rows are the point,
 not a dodge: they are workloads `ruptures` cannot run at all.
 
+Every case is the best of as many runs as fit in a twenty-second budget, so a
+timing is not reported from a single noisy sample unless the case is too slow
+to repeat at all.
+
     python bench/bench.py                       # full table
     python bench/bench.py --quick               # smaller sizes
     python bench/bench.py --json results.json   # machine-readable
@@ -51,10 +55,36 @@ SECTIONS = (
 )
 
 
-def timed(fn):
-    t0 = time.perf_counter()
-    out = fn()
-    return time.perf_counter() - t0, out
+#: Keep repeating a case until this much wall clock has gone into it, then
+#: stop. A millisecond case gets seven runs, a ten-second case gets two, and a
+#: six-minute case gets one — which is the best that can be done for the rows
+#: where the reference is the whole cost.
+REPEAT_BUDGET_SECONDS = 20.0
+MAX_REPEATS = 7
+
+
+def timed(fn, budget=REPEAT_BUDGET_SECONDS, max_repeats=MAX_REPEATS):
+    """Best of several runs, where several runs are cheap.
+
+    A sub-millisecond measurement on a desktop swings by more than a factor of
+    two between runs — enough to move a reported speedup from 783x to 1,803x
+    for the same code — and even a ten-second `ruptures` case was observed to
+    vary by 60%. Taking the minimum over repeats removes most of that. The
+    budget is what stops a case that already took six minutes from being run
+    seven times to confirm that it still takes six minutes.
+    """
+    best = None
+    out = None
+    spent = 0.0
+    for _ in range(max_repeats):
+        t0 = time.perf_counter()
+        out = fn()
+        elapsed = time.perf_counter() - t0
+        best = elapsed if best is None else min(best, elapsed)
+        spent += elapsed
+        if spent >= budget:
+            break
+    return best, out
 
 
 def signal_for(n, d=1, n_bkps=5, seed=3):

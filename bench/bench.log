@@ -1,30 +1,32 @@
 python 3.14.3 | ruptures 1.1.9 | ruptures-rs 0.1.0
 AMD Ryzen 5 5600G (6 cores), Windows 11
-Assembled with: bench.py --section <name> --json bench/results.json --append
-Re-printed with: bench.py --render bench/results.json
+Single full run: python bench/bench.py --json bench/results.json
+Each case is the best of as many runs as fit a 20s budget.
 case                                       ruptures  ruptures-rs     speedup   match
 ------------------------------------------------------------------------------------
-Dynp l2  n=500 K=5 jump=1                    3.710s      0.0043s        863x   yes
-Dynp l2  n=1,000 K=5 jump=1                 16.956s      0.0047s      3,612x   yes
-Dynp l2  n=2,000 K=5 jump=1                 84.006s      0.0181s      4,640x   yes
-Dynp l2  n=4,000 K=5 jump=1                370.109s      0.0829s      4,463x   yes
-Dynp l2  n=20,000 K=5 jump=10                   n/a      0.0284s         n/a   -
-Dynp l2  n=50,000 K=5 jump=10                   n/a      0.1110s         n/a   -
-Pelt l2  n=1,000 pen=200 jump=1              1.483s      0.0151s         98x   yes
-Pelt l2  n=5,000 pen=200 jump=1             53.762s      0.0429s      1,253x   yes
-Pelt l2  n=20,000 pen=200 jump=1           916.281s      1.1200s        818x   yes
-Binseg l2  n=5,000 K=5 jump=1                1.121s      0.0009s      1,187x   yes
-BottomUp l2  n=5,000 K=5 jump=1              0.063s      0.0023s         28x   yes
-Window l2  n=5,000 width=100 jump=1          0.405s      0.0025s        161x   yes
-Dynp l1  n=1,500 K=4 jump=5                  2.805s      0.0593s         47x   yes
-Dynp normal  n=1,500 K=4 jump=5              2.239s      0.0029s        783x   yes
-Dynp rank  n=1,500 K=4 jump=5                2.186s      0.0028s        767x   yes
-Dynp mahalanobis  n=1,500 K=4 jump=5        14.765s      0.0078s      1,890x   yes
-Dynp rbf  n=1,500 K=4 jump=5                13.488s      0.0409s        330x   yes
-Dynp linear  n=1,500 K=4 jump=5              1.454s      0.0133s        110x   yes
-Dynp ar  n=1,500 K=4 jump=5                  2.704s      0.0663s         41x   yes
-KernelCPD linear  n=2,000 K=5                0.028s      0.0137s          2x   yes
-KernelCPD linear  n=10,000 K=5               0.887s      0.3354s          3x   yes
-Crops n=2,000 vs 50-point grid              16.400s      0.0279s        587x   -
+Dynp l2  n=500 K=5 jump=1                    4.334s      0.0016s      2,694x   yes
+Dynp l2  n=1,000 K=5 jump=1                 21.003s      0.0056s      3,725x   yes
+Dynp l2  n=2,000 K=5 jump=1                 88.203s      0.0181s      4,863x   yes
+Dynp l2  n=4,000 K=5 jump=1                221.144s      0.0608s      3,637x   yes
+Dynp l2  n=20,000 K=5 jump=10                   n/a      0.0104s         n/a   -
+Dynp l2  n=50,000 K=5 jump=10                   n/a      0.0639s         n/a   -
+Pelt l2  n=1,000 pen=200 jump=1              1.106s      0.0015s        723x   yes
+Pelt l2  n=5,000 pen=200 jump=1             32.436s      0.0308s      1,052x   yes
+Pelt l2  n=20,000 pen=200 jump=1           542.080s      0.5386s      1,007x   yes
+Binseg l2  n=5,000 K=5 jump=1                0.476s      0.0002s      2,018x   yes
+BottomUp l2  n=5,000 K=5 jump=1              0.034s      0.0015s         23x   yes
+Window l2  n=5,000 width=100 jump=1          0.189s      0.0013s        146x   yes
+Dynp l1  n=1,500 K=4 jump=5                  1.329s      0.0461s         29x   yes
+Dynp normal  n=1,500 K=4 jump=5              1.177s      0.0005s      2,524x   yes
+Dynp rank  n=1,500 K=4 jump=5                1.099s      0.0015s        737x   yes
+Dynp mahalanobis  n=1,500 K=4 jump=5         6.728s      0.0027s      2,447x   yes
+Dynp rbf  n=1,500 K=4 jump=5                 7.051s      0.0267s        264x   yes
+Dynp linear  n=1,500 K=4 jump=5              1.014s      0.0091s        112x   yes
+Dynp ar  n=1,500 K=4 jump=5                  1.484s      0.0397s         37x   yes
+KernelCPD linear  n=2,000 K=5                0.020s      0.0077s          3x   yes
+KernelCPD linear  n=10,000 K=5               0.571s      0.1971s          3x   yes
+------------------------------------------------------------------------------------
+CROPS  n=2,000, penalties [1, 10000]: 79 distinct segmentations in 0.0165s
+  50-point ruptures grid over the same range: 10.421s, 22 distinct segmentations (632x slower, 59 regimes missed)
 ------------------------------------------------------------------------------------
 all 19 compared cases returned identical breakpoints

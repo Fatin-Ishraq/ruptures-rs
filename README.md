@@ -36,7 +36,7 @@ return self.signal[start:end].var(axis=0).sum() * (end - start)
 
 which is a NumPy call whose fixed dispatch overhead dwarfs its own arithmetic,
 and the dynamic program makes one at every cell of an O(n²K) table. On a
-4,000-point signal that is six minutes of wall clock, essentially all of it
+4,000-point signal that is several minutes of wall clock, essentially all of it
 inside those calls.
 
 Nearly every one of these costs is a difference of prefix sums in disguise. With
@@ -61,34 +61,37 @@ cost(a, b) = Σ_d [ S2[b] − S2[a] − (S1[b] − S1[a])² / (b − a) ]
 So the win is not only the constant factor from leaving Python. `Dynp` in
 `ruptures` is O(n²K) cells × O(len) per cell; here it is O(n²K) cells × O(1).
 
-In practice the measured speedup climbs with signal size and then settles.
-Below a few thousand samples NumPy's fixed per-call overhead is what dominates
-the reference, and that part is a constant factor; the O(len) term only starts
-to bite once segments get long.
+In practice the measured speedup climbs with signal size into the thousands and
+then flattens out. Below a few thousand samples NumPy's fixed per-call overhead
+is what dominates the reference, and that part is a constant factor; the O(len)
+term only starts to bite once segments get long.
 
 `l1` is the honest exception: a per-segment median is not a prefix-summable
 statistic, so it stays O(len) and gains only the constant factor.
 
 ## Benchmarks
 
-AMD Ryzen 5 5600G (6 cores), Python 3.14, `ruptures` 1.1.9. Every row was
-checked for identical breakpoints; `python bench/bench.py` reproduces the table
-and `bench/bench.log` is the run these numbers come from.
+AMD Ryzen 5 5600G (6 cores), Python 3.14, `ruptures` 1.1.9, from the single run
+recorded in `bench/bench.log`. Every row was checked for identical breakpoints,
+and each timing is the best of as many runs as fit a twenty-second budget —
+which stabilises the fast side, where a single sample swings by more than a
+factor of two. The rows where `ruptures` takes minutes still get one run each,
+so treat the leading digit as the claim and not the third.
 
 ### Detectors
 
 | workload | `ruptures` | `ruptures-rs` | speedup |
 |---|---:|---:|---:|
-| `Dynp` l2, n=500, K=5, jump=1 | 3.71 s | 0.0043 s | **863x** |
-| `Dynp` l2, n=1,000 | 16.96 s | 0.0047 s | **3,612x** |
-| `Dynp` l2, n=2,000 | 84.01 s | 0.0181 s | **4,640x** |
-| `Dynp` l2, n=4,000 | 370.11 s | 0.0829 s | **4,463x** |
-| `Pelt` l2, n=1,000, pen=200, jump=1 | 1.48 s | 0.0151 s | 98x |
-| `Pelt` l2, n=5,000 | 53.76 s | 0.0429 s | **1,253x** |
-| `Pelt` l2, n=20,000 | 916.28 s | 1.1200 s | **818x** |
-| `Binseg` l2, n=5,000, K=5, jump=1 | 1.12 s | 0.0009 s | **1,187x** |
-| `Window` l2, n=5,000, width=100 | 0.405 s | 0.0025 s | 161x |
-| `BottomUp` l2, n=5,000, K=5, jump=1 | 0.063 s | 0.0023 s | 28x |
+| `Dynp` l2, n=500, K=5, jump=1 | 4.33 s | 0.0016 s | **2,694x** |
+| `Dynp` l2, n=1,000 | 21.00 s | 0.0056 s | **3,725x** |
+| `Dynp` l2, n=2,000 | 88.20 s | 0.0181 s | **4,863x** |
+| `Dynp` l2, n=4,000 | 221.14 s | 0.0608 s | **3,637x** |
+| `Pelt` l2, n=1,000, pen=200, jump=1 | 1.11 s | 0.0015 s | 723x |
+| `Pelt` l2, n=5,000 | 32.44 s | 0.0308 s | **1,052x** |
+| `Pelt` l2, n=20,000 | 542.08 s | 0.5386 s | **1,007x** |
+| `Binseg` l2, n=5,000, K=5, jump=1 | 0.476 s | 0.0002 s | **2,018x** |
+| `Window` l2, n=5,000, width=100 | 0.189 s | 0.0013 s | 146x |
+| `BottomUp` l2, n=5,000, K=5, jump=1 | 0.034 s | 0.0015 s | 23x |
 
 `BottomUp` gains least, and that is the expected result rather than a
 disappointment: most of its work is building the initial tree, which was never
@@ -100,18 +103,18 @@ the part dominated by cost evaluations.
 
 | model | `ruptures` | `ruptures-rs` | speedup |
 |---|---:|---:|---:|
-| `mahalanobis` | 14.76 s | 0.0078 s | **1,890x** |
-| `normal` | 2.24 s | 0.0029 s | 783x |
-| `rank` | 2.19 s | 0.0028 s | 767x |
-| `rbf` | 13.49 s | 0.0409 s | 330x |
-| `linear` | 1.45 s | 0.0133 s | 110x |
-| `l1` | 2.80 s | 0.0593 s | 47x |
-| `ar` | 2.70 s | 0.0663 s | 41x |
+| `normal` | 1.18 s | 0.0005 s | **2,524x** |
+| `mahalanobis` | 6.73 s | 0.0027 s | **2,447x** |
+| `rank` | 1.10 s | 0.0015 s | 737x |
+| `rbf` | 7.05 s | 0.0267 s | 264x |
+| `linear` | 1.01 s | 0.0091 s | 112x |
+| `ar` | 1.48 s | 0.0397 s | 37x |
+| `l1` | 1.33 s | 0.0461 s | 29x |
 
-`l1` is near the bottom, as expected: it is the one cost that cannot become
-O(1). `linear` and `ar` are there for a different reason — each segment cost is
-a small least-squares solve, and the rank-revealing factorisation that keeps
-them agreeing with NumPy costs more than a plain Cholesky would.
+`l1` is last, as expected: it is the one cost that cannot become O(1). `linear`
+and `ar` are near it for a different reason — each segment cost is a small
+least-squares solve, and the rank-revealing factorisation that keeps them
+agreeing with NumPy costs more than a plain Cholesky would.
 
 ### Against C, not against NumPy
 
@@ -121,19 +124,19 @@ overhead is gone from both sides:
 
 | workload | `ruptures` (C) | `ruptures-rs` | speedup |
 |---|---:|---:|---:|
-| `KernelCPD` linear, n=2,000, K=5 | 0.028 s | 0.0137 s | 2x |
-| `KernelCPD` linear, n=10,000, K=5 | 0.887 s | 0.3354 s | 3x |
+| `KernelCPD` linear, n=2,000, K=5 | 0.020 s | 0.0077 s | 3x |
+| `KernelCPD` linear, n=10,000, K=5 | 0.571 s | 0.1971 s | 3x |
 
-A factor of two or three, which is roughly what one compiled implementation
-should beat another by. Everywhere else in this table the reference is paying
-NumPy dispatch, and that is where the thousands come from.
+A factor of three, which is roughly what one compiled implementation should
+beat another by. Everywhere else in this table the reference is paying NumPy
+dispatch, and that is where the thousands come from.
 
 ### Sizes the reference cannot reach
 
 | workload | `ruptures` | `ruptures-rs` |
 |---|---:|---:|
-| `Dynp` l2, n=20,000, K=5, jump=10 | infeasible | 0.028 s |
-| `Dynp` l2, n=50,000, K=5, jump=10 | infeasible | 0.111 s |
+| `Dynp` l2, n=20,000, K=5, jump=10 | infeasible | 0.010 s |
+| `Dynp` l2, n=50,000, K=5, jump=10 | infeasible | 0.064 s |
 
 Exact dynamic programming on a 50,000-point signal is not a workload `ruptures`
 can run — extrapolating its own curve puts it in the range of days, and its
@@ -144,10 +147,10 @@ the part that is a new capability rather than a faster one.
 
 | | time | segmentations found |
 |---|---:|---:|
-| `Crops`, n=2,000, penalties [1, 10000] | 0.028 s | 79 |
-| 50-point `ruptures` PELT grid, same range | 16.40 s | 22 |
+| `Crops`, n=2,000, penalties [1, 10000] | 0.017 s | 79 |
+| 50-point `ruptures` PELT grid, same range | 10.42 s | 22 |
 
-587x faster, and it finds the 59 regimes the grid steps over.
+632x faster, and it finds the 59 regimes the grid steps over.
 
 ## What `Crops` adds
 
@@ -363,7 +366,15 @@ pip install maturin pytest numpy scipy ruptures
 maturin develop --release
 pytest tests/ -q
 cargo test
-python bench/bench.py
+```
+
+The full benchmark is about half an hour, nearly all of it spent inside
+`ruptures`. It can be rebuilt a piece at a time, which is what you want after
+changing one cost:
+
+```bash
+python bench/bench.py --section models --json bench/results.json --append
+python bench/bench.py --render bench/results.json
 ```
 
 ## Licence and credit
