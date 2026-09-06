@@ -7,7 +7,7 @@ name = "ruptures-rs"
 requires-python = ">=3.10"
 description = "Fast, drop-in change point detection for Python, powered by Rust"
 readme = "README.md"
-license = { text = "BSD-2-Clause" }
+license = { file = "LICENSE" }
 authors = [{ name = "Fatin Ishraq" }]
 keywords = ["change point detection", "time series", "segmentation", "rust"]
 classifiers = [

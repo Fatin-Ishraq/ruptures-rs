@@ -7,4 +7,4 @@ __pycache__/
 dist/
 *.egg-info/
 .pytest_cache/
-bench/*.json
+# bench results are committed as provenance for the README numbers

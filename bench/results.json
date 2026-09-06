@@ -1,0 +1,130 @@
+[
+  {
+    "case": "Dynp l2  n=500 K=5 jump=1",
+    "ruptures": 2.2019003000004886,
+    "ruptures_rs": 0.0017038000005413778,
+    "speedup": 1292.346695211199,
+    "match": true
+  },
+  {
+    "case": "Dynp l2  n=1,000 K=5 jump=1",
+    "ruptures": 16.453940299999886,
+    "ruptures_rs": 0.0027955000005022157,
+    "speedup": 5885.866677533147,
+    "match": true
+  },
+  {
+    "case": "Dynp l2  n=2,000 K=5 jump=1",
+    "ruptures": 62.930100599999605,
+    "ruptures_rs": 0.010616900000059104,
+    "speedup": 5927.351731640053,
+    "match": true
+  },
+  {
+    "case": "Dynp l2  n=4,000 K=5 jump=1",
+    "ruptures": 295.6213041000001,
+    "ruptures_rs": 0.048342300000513205,
+    "speedup": 6115.168374215992,
+    "match": true
+  },
+  {
+    "case": "Dynp l2  n=20,000 K=5 jump=10",
+    "ruptures": null,
+    "ruptures_rs": 0.022976700000072015,
+    "speedup": null,
+    "match": null
+  },
+  {
+    "case": "Dynp l2  n=50,000 K=5 jump=10",
+    "ruptures": null,
+    "ruptures_rs": 0.08634129999973084,
+    "speedup": null,
+    "match": null
+  },
+  {
+    "case": "Pelt l2  n=1,000 pen=200 jump=1",
+    "ruptures": 1.7359339000004184,
+    "ruptures_rs": 0.011389900000722264,
+    "speedup": 152.40993335238574,
+    "match": true
+  },
+  {
+    "case": "Pelt l2  n=5,000 pen=200 jump=1",
+    "ruptures": 38.01560250000057,
+    "ruptures_rs": 0.06698789999973087,
+    "speedup": 567.4995409641637,
+    "match": true
+  },
+  {
+    "case": "Pelt l2  n=20,000 pen=200 jump=1",
+    "ruptures": 722.5215802000002,
+    "ruptures_rs": 0.5416955999999118,
+    "speedup": 1333.8147479878328,
+    "match": true
+  },
+  {
+    "case": "Binseg l2  n=5,000 K=5 jump=1",
+    "ruptures": 0.49252900000010413,
+    "ruptures_rs": 0.005648500000461354,
+    "speedup": 87.1964238222317,
+    "match": true
+  },
+  {
+    "case": "BottomUp l2  n=5,000 K=5 jump=1",
+    "ruptures": 0.03328750000036962,
+    "ruptures_rs": 0.0018852000002880231,
+    "speedup": 17.65727773991296,
+    "match": true
+  },
+  {
+    "case": "Window l2  n=5,000 width=100 jump=1",
+    "ruptures": 0.18858110000019224,
+    "ruptures_rs": 0.0021737999995821156,
+    "speedup": 86.75181711125424,
+    "match": true
+  },
+  {
+    "case": "Dynp l1  n=1,500 K=4 jump=5",
+    "ruptures": 6.125881599999957,
+    "ruptures_rs": 0.042355200000201876,
+    "speedup": 144.63115744869012,
+    "match": true
+  },
+  {
+    "case": "Dynp normal  n=1,500 K=4 jump=5",
+    "ruptures": 1.2303015999996205,
+    "ruptures_rs": 0.0018512999995436985,
+    "speedup": 664.560903312732,
+    "match": true
+  },
+  {
+    "case": "Dynp rank  n=1,500 K=4 jump=5",
+    "ruptures": 1.1282271000000037,
+    "ruptures_rs": 0.00596270000005461,
+    "speedup": 189.21413118045024,
+    "match": true
+  },
+  {
+    "case": "Dynp mahalanobis  n=1,500 K=4 jump=5",
+    "ruptures": 6.6521202999992965,
+    "ruptures_rs": 0.003150600000481063,
+    "speedup": 2111.3820538892874,
+    "match": true
+  },
+  {
+    "case": "Dynp rbf  n=1,500 K=4 jump=5",
+    "ruptures": 6.430250199999136,
+    "ruptures_rs": 0.024861199999577366,
+    "speedup": 258.64601065549726,
+    "match": true
+  },
+  {
+    "case": "Crops n=2,000 vs 50-point grid",
+    "ruptures": 10.281358700000055,
+    "ruptures_rs": 0.01831080000010843,
+    "speedup": 561.4915077407417,
+    "match": null,
+    "crops_regimes": 79,
+    "grid_regimes": 22
+  }
+]
