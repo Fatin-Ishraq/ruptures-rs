@@ -1,0 +1,6 @@
+python 3.14.3 | ruptures 1.1.9 | ruptures-rs 0.1.0
+case                                       ruptures  ruptures-rs     speedup   match
+------------------------------------------------------------------------------------
+Dynp l2  n=500 K=5 jump=1                    2.202s      0.0017s      1,292x   yes
+Dynp l2  n=1,000 K=5 jump=1                 16.454s      0.0028s      5,886x   yes
+Dynp l2  n=2,000 K=5 jump=1                 62.930s      0.0106s      5,927x   yes

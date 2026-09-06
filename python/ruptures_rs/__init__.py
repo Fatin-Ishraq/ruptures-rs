@@ -16,7 +16,7 @@ interval each one owns. `ruptures` has no equivalent, and it removes the need
 to guess a penalty or sweep a grid.
 """
 
-from . import base, costs, datasets, detection, exceptions, metrics, utils
+from . import base, costs, datasets, detection, exceptions, metrics, show, utils, version
 from ._ruptures_rs import __version__
 from .costs import (
     CostAR,
@@ -36,6 +36,7 @@ from .datasets import pw_constant, pw_linear, pw_normal, pw_wavy
 from .detection import Binseg, BottomUp, Dynp, KernelCPD, Pelt, Window
 from .exceptions import BadSegmentationParameters, NotEnoughPoints
 from .metrics import hausdorff, meantime, precision_recall, randindex
+from .show import display
 
 
 def install():
@@ -60,7 +61,9 @@ def install():
         ".detection",
         ".exceptions",
         ".metrics",
+        ".show",
         ".utils",
+        ".version",
     ):
         sys.modules["ruptures" + name] = sys.modules[__name__ + name]
     return sys.modules[__name__]
@@ -97,6 +100,8 @@ __all__ = [
     "hausdorff",
     "meantime",
     "randindex",
+    # plotting
+    "display",
     # exceptions
     "NotEnoughPoints",
     "BadSegmentationParameters",
@@ -107,7 +112,9 @@ __all__ = [
     "detection",
     "exceptions",
     "metrics",
+    "show",
     "utils",
+    "version",
     "install",
     "__version__",
 ]
