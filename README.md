@@ -1,5 +1,9 @@
 # ruptures-rs
 
+[![CI](https://github.com/Fatin-Ishraq/ruptures-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Fatin-Ishraq/ruptures-rs/actions/workflows/ci.yml)
+[![License: BSD-2-Clause](https://img.shields.io/badge/License-BSD--2--Clause-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%20--%203.14-blue.svg)](https://pypi.org/project/ruptures-rs/)
+
 Fast, drop-in change point detection for Python, powered by Rust.
 
 ```diff
