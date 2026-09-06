@@ -208,40 +208,70 @@ def test_mahalanobis_accepts_a_list_metric():
     assert from_list == from_array
 
 
-def test_singular_covariance_warns_instead_of_returning_silent_noise():
+def near_singular_signal(delta):
+    """Two columns collinear to within `delta`, so the covariance is as
+    ill-conditioned as we ask for and no more."""
+    rng = np.random.default_rng(4)
+    c1 = rng.normal(size=(200, 1))
+    c2 = rng.normal(size=(200, 1))
+    return np.c_[c1, c1 * 3.0 + delta * c2]
+
+
+def test_near_singular_covariance_warns():
     """The default Mahalanobis metric is an inverse, and `numpy.linalg.inv`
     only raises on *exact* singularity.
 
-    One rounding step short of that it returns a matrix of ~1e15 entries, and
-    every cost computed from it is cancellation. `ruptures` says nothing; every
-    disagreement between the two libraries on this cost was on a covariance in
-    that state.
+    One rounding step short of that it returns a matrix whose entries are pure
+    cancellation, and every cost computed from it is noise. `ruptures` says
+    nothing; every disagreement between the two libraries on this cost was on a
+    covariance in that state.
+
+    `delta` is chosen so the covariance is conditioned at about 1e13: past the
+    threshold where the costs stop meaning anything, but well short of the
+    point where LAPACK refuses to invert it at all. That keeps this test about
+    the warning rather than about which LAPACK the platform ships.
+    """
+    with pytest.warns(RuntimeWarning, match="numerically singular"):
+        rpt.CostMl().fit(near_singular_signal(1e-6))
+
+
+def test_exactly_singular_covariance_is_never_silent():
+    """Exact collinearity is where platforms stop agreeing.
+
+    macOS builds of NumPy raise `LinAlgError` from `inv` here, which is also
+    what `ruptures` does on that platform; Linux and Windows builds return a
+    matrix of ~1e15 entries and reach the warning instead. Both are acceptable
+    and the reference behaves the same way, so the property worth asserting is
+    the one that holds everywhere: the caller is told, one way or the other.
     """
     base = rpt.pw_constant(120, 1, 3, seed=5)[0]
     degenerate = np.c_[base, base * 0.5 + 1.0]
-    with pytest.warns(RuntimeWarning, match="numerically singular"):
-        rpt.CostMl().fit(degenerate)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        try:
+            rpt.CostMl().fit(degenerate)
+        except np.linalg.LinAlgError:
+            return  # LAPACK refused outright, exactly as `ruptures` does
+    assert any(
+        "numerically singular" in str(w.message) for w in caught
+    ), "an exactly singular covariance was inverted without a word"
 
 
 def test_ordinary_correlated_columns_do_not_warn():
     """The other half of the claim: the warning has to be quiet on real data,
     or it is noise people learn to filter out.
 
-    Correlated is not collinear — this fires only when two columns agree to
-    about one part in a trillion.
+    Correlated is not collinear. Columns agreeing to one part in ten thousand
+    leave the covariance conditioned at ~1e10, which is still fine.
     """
-    rng = np.random.default_rng(4)
     for seed in range(12):
         sig = rpt.pw_normal(200, 3, seed=seed)[0]
         with warnings.catch_warnings():
             warnings.simplefilter("error", RuntimeWarning)
             rpt.CostMl().fit(sig)
-    # Strongly but not degenerately correlated columns are fine too.
-    base = rng.normal(size=(200, 1))
-    correlated = np.c_[base, base * 2.0 + rng.normal(scale=1e-3, size=(200, 1))]
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
-        rpt.CostMl().fit(correlated)
+        rpt.CostMl().fit(near_singular_signal(1e-4))
 
 
 # ------------------------------------------------------------------ Window

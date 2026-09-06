@@ -12,7 +12,7 @@ Fast, drop-in change point detection for Python, powered by Rust.
 ```
 
 That is the whole migration. Same classes, same arguments, same breakpoints —
-verified by 1,391 tests that run both libraries on the same input and demand
+verified by 1,392 tests that run both libraries on the same input and demand
 *identical* output, not merely similar output.
 
 ```bash
@@ -225,7 +225,7 @@ to 1e-11, and `ar` at an offset of 1e5 from 1.7e-2 to 2.8e-10.
 The whole project is only worth anything if the answers match, so that is what
 the suite tests.
 
-- **1,391 tests**, most of them differential against `ruptures` on the same
+- **1,392 tests**, most of them differential against `ruptures` on the same
   input.
 - **800 randomised fuzz cases** over signal length, dimension, `jump`,
   `min_size`, penalty, model, stopping rule and seed, asserting *exact*

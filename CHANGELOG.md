@@ -3,7 +3,16 @@
 This project follows [Semantic Versioning](https://semver.org/). Dates are
 ISO 8601.
 
-## [Unreleased]
+## 0.1.0 — 2026-09-06
+
+First public release: a drop-in reimplementation of `ruptures` 1.1.9 in Rust,
+with the same classes, arguments and breakpoints, plus `Crops`, which the
+reference does not have.
+
+Everything below is development history rather than news to a new user. It is
+recorded because the defects were real, several of them were the kind that a
+test suite passing 759 cases still did not see, and someone comparing this
+package to the reference deserves to know what was found and what was decided.
 
 ### Fixed — crashes
 
@@ -128,7 +137,7 @@ machine precision is meaningless in both libraries.
 
 ### Testing
 
-1,391 tests, up from 759, with 800 randomised differential fuzz cases up from
+1,392 tests, up from 759, with 800 randomised differential fuzz cases up from
 440. New: fuzz coverage for `Window`, `epsilon` stopping, `linear`/`ar`/`cosine`
 and `KernelCPD` in both of its modes; robustness tests for every crash above;
 and tie-behaviour tests that assert the exact detectors never return a worse

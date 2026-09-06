@@ -153,6 +153,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [lint, rust-tests, test, sdist-install, wheels, sdist]
     runs-on: ubuntu-latest
+    # Trusted publishing: PyPI mints a short-lived token from this workflow's
+    # OIDC identity, so there is no API token to store or leak. The identity
+    # PyPI checks is (repository, workflow file, environment), and all three
+    # have to match what is registered there — including this environment name.
     environment: release
     permissions:
       id-token: write
@@ -161,7 +165,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - uses: PyO3/maturin-action@v1
+      # `pypa/gh-action-pypi-publish` is what implements the OIDC exchange.
+      # `maturin upload` wants a token and does not do it.
+      - uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          command: upload
-          args: --non-interactive --skip-existing dist/*
+          skip-existing: true
