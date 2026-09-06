@@ -16,7 +16,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, not `stable`. `-D warnings` against a rolling toolchain means
+      # any Rust release can fail CI on unchanged code. This repo's first run
+      # broke exactly that way: CI was on 1.98.1, development on 1.94.1, and
+      # the newer clippy rejected a `sort_by` the older one accepted. Bump
+      # this deliberately rather than being surprised by it.
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check

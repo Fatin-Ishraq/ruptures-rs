@@ -458,7 +458,7 @@ impl<'a> BottomUp<'a> {
 
         loop {
             let mut stop = true;
-            merged.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+            merged.sort_by_key(|a| (a.0, a.1));
             // pop the cheapest merge whose children still exist
             let mut picked: Option<BNode> = None;
             while !merged.is_empty() {
@@ -591,7 +591,7 @@ pub fn window_seg(
     // sort ascending by (gain, index); the loop pops from the back
     let mut ranked: Vec<(Ordf64, usize)> =
         peaks.iter().map(|&p| (Ordf64(score[p]), inds[p])).collect();
-    ranked.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    ranked.sort_by_key(|a| (a.0, a.1));
     let mut peak_inds: Vec<usize> = ranked.into_iter().map(|(_, i)| i).collect();
 
     loop {
