@@ -14,7 +14,11 @@ import warnings
 import numpy as np
 import pytest
 
-import ruptures as rpt_py
+# Every test here compares against `ruptures`.
+# On Python versions the reference itself does not support - it declares
+# `requires_python = "<3.14"` - skip rather than fail. This package works
+# on those versions even though the reference does not.
+rpt_py = pytest.importorskip("ruptures", reason="reference not installable here")
 import ruptures_rs as rpt_rs
 
 warnings.filterwarnings("ignore", category=UserWarning)

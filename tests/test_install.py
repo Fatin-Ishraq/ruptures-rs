@@ -82,6 +82,7 @@ def test_install_produces_accelerated_estimators():
 
 def test_install_refuses_after_real_ruptures_imported():
     """Half-patching the module graph would be worse than not patching it."""
+    pytest.importorskip("ruptures", reason="reference not installable here")
     out = run(
         """
         import ruptures  # the real one, first
@@ -121,7 +122,7 @@ def test_public_surface_is_present(name):
 
 def test_covers_every_public_name_ruptures_exposes():
     """Coverage check: a partial drop-in is worthless, so measure it."""
-    import ruptures as rpt_py
+    rpt_py = pytest.importorskip("ruptures", reason="reference not installable here")
 
     import ruptures_rs as rpt_rs
 

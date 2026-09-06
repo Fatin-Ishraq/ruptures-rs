@@ -19,6 +19,12 @@ verified by 759 tests that run both libraries on the same input and demand
 pip install ruptures-rs
 ```
 
+Supports **Python 3.10 through 3.14** from a single `abi3` wheel per platform.
+That matters more than it sounds: `ruptures` 1.1.10 declares
+`requires_python = "<3.14"` and ships no cp314 wheel, so on Python 3.14 `pip`
+falls back to 1.1.9 and compiles it from source — which needs a C toolchain,
+and fails without one. This installs as a prebuilt wheel.
+
 ## Why it is faster
 
 `ruptures` is a well-designed library with one structural performance problem:

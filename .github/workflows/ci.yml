@@ -34,7 +34,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.10", "3.13"]
+        # 3.14 is included deliberately: `ruptures` declares
+        # requires_python "<3.14" and ships no cp314 wheel, so it cannot be
+        # installed there. One abi3-py310 wheel covers 3.10 onward, so this
+        # package works on 3.14 anyway - and this matrix entry is what proves
+        # it rather than asserting it.
+        python: ["3.10", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,17 +47,27 @@ jobs:
           python-version: ${{ matrix.python }}
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install
+      - name: Build and install
+        shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install maturin pytest numpy scipy
-          # The reference implementation: every test is differential against it.
-          pip install "ruptures>=1.1.9"
+          pip install maturin pytest numpy
           maturin build --release --out dist
           pip install --no-index --find-links dist ruptures-rs
 
+      - name: Install the reference implementation
+        shell: bash
+        # Most tests are differential against `ruptures`. Where it cannot be
+        # installed the suite skips those and still runs everything that
+        # validates this package on its own - precision against exact
+        # arithmetic, the install shim, the API surface, the memory guard.
+        # A missing reference must not fail a build.
+        run: |
+          pip install scipy "ruptures>=1.1.9" || echo "::warning::reference unavailable here; differential tests will skip"
+
       - name: Test
-        run: pytest tests/ -q
+        shell: bash
+        run: pytest tests/ -q -rs
 
   wheels:
     name: wheels ${{ matrix.platform.os }} ${{ matrix.platform.target }}

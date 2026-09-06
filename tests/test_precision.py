@@ -16,7 +16,6 @@ from decimal import Decimal, getcontext
 import numpy as np
 import pytest
 
-import ruptures as rpt_py
 import ruptures_rs as rpt_rs
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -119,6 +118,7 @@ def test_beats_ruptures_on_extreme_offsets():
     avoids that. If this test ever fails, either the reference improved or this
     package regressed — both worth knowing.
     """
+    rpt_py = pytest.importorskip("ruptures", reason="reference not installable here")
     sig = rpt_rs.pw_constant(120, 2, 3, noise_std=2, seed=6)[0] + 1e9
     metric = np.linalg.inv(np.cov(sig.T))
     start, end = 23, 88
