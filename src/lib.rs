@@ -58,6 +58,22 @@ fn inv_spd(a: &[f64], d: usize) -> PyResult<Vec<f64>> {
     Ok(out)
 }
 
+/// Kernel costs need an `(n+1)^2` table of f64 — the same quadratic memory
+/// `ruptures` spends on its dense Gram matrix. Refuse with an actionable
+/// message rather than letting the allocator take the process down.
+fn check_kernel_memory(n: usize, model: &str) -> PyResult<()> {
+    const LIMIT_BYTES: usize = 4 << 30; // 4 GiB
+    let needed = (n + 1).saturating_mul(n + 1).saturating_mul(8);
+    if needed > LIMIT_BYTES {
+        return Err(PyValueError::new_err(format!(
+            "the `{model}` model needs a {n}x{n} kernel table ({:.1} GiB) for a signal of              {n} samples, over the {:.0} GiB limit. Subsample the signal, or use a              non-kernel model such as `l2` or `normal`, which need no quadratic memory.",
+            needed as f64 / (1u64 << 30) as f64,
+            LIMIT_BYTES as f64 / (1u64 << 30) as f64,
+        )));
+    }
+    Ok(())
+}
+
 /// Sample covariance with `ddof=1`, as `np.cov` computes it.
 fn covariance(sig: &[f64], n: usize, d: usize) -> Vec<f64> {
     let mut mean = vec![0.0; d];
@@ -135,11 +151,15 @@ impl CostEngine {
                 Box::new(CostNormal::new(&sig, n, d, add))
             }
             "rbf" => {
+                check_kernel_memory(n, "rbf")?;
                 let (c, g) = CostKernel::rbf(&sig, n, d, getf("gamma")?);
                 gamma_out = Some(g);
                 Box::new(c)
             }
-            "cosine" => Box::new(CostKernel::cosine(&sig, n, d)),
+            "cosine" => {
+                check_kernel_memory(n, "cosine")?;
+                Box::new(CostKernel::cosine(&sig, n, d))
+            }
             "rank" => Box::new(CostRank::new(&sig, n, d)),
             "clinear" => Box::new(CostCLinear::new(&sig, n, d)),
             "mahalanobis" => {
