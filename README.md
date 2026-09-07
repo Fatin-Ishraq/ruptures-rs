@@ -1,10 +1,27 @@
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/Fatin-Ishraq/ruptures-rs/main/assets/logo.png" alt="" width="84">
+
 # ruptures-rs
 
-[![CI](https://github.com/Fatin-Ishraq/ruptures-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Fatin-Ishraq/ruptures-rs/actions/workflows/ci.yml)
-[![License: BSD-2-Clause](https://img.shields.io/badge/License-BSD--2--Clause-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%20--%203.14-blue.svg)](https://pypi.org/project/ruptures-rs/)
+**Fast, drop-in change point detection for Python, powered by Rust.**
 
-Fast, drop-in change point detection for Python, powered by Rust.
+[![PyPI](https://img.shields.io/pypi/v/ruptures-rs?color=C2410C&label=pypi)](https://pypi.org/project/ruptures-rs/)
+[![Python](https://img.shields.io/badge/python-3.10%20–%203.14-blue.svg)](https://pypi.org/project/ruptures-rs/)
+[![CI](https://github.com/Fatin-Ishraq/ruptures-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Fatin-Ishraq/ruptures-rs/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](LICENSE)
+
+</div>
+
+<!-- Two variants so the figure is not a glaring white rectangle on a dark
+     page. GitHub honours the <picture>; PyPI strips it and keeps the inner
+     <img>, which is the light one. -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Fatin-Ishraq/ruptures-rs/main/assets/hero-dark.png">
+  <img alt="A 2,000-point noisy signal with six change points. Shading marks the true regimes; the bold line is the piecewise-constant model ruptures-rs fitted, whose steps land on the regime boundaries to within twenty samples out of two thousand." src="https://raw.githubusercontent.com/Fatin-Ishraq/ruptures-rs/main/assets/hero-light.png">
+</picture>
+
+## Drop-in
 
 ```diff
 - import ruptures as rpt
@@ -18,6 +35,16 @@ verified by 1,392 tests that run both libraries on the same input and demand
 ```bash
 pip install ruptures-rs
 ```
+
+```python
+import ruptures_rs as rpt
+
+signal, _ = rpt.pw_constant(2_000, 1, 6, noise_std=3, seed=11)
+bkps = rpt.Dynp(model="l2", min_size=20, jump=5).fit(signal).predict(6)
+#  -> [275, 550, 840, 1120, 1415, 1710, 2000]      in 1.6 ms
+```
+
+The same call on the same signal takes `ruptures` about 1.7 seconds — the same answer, roughly a thousand times slower.
 
 Supports **Python 3.10 through 3.14** from a single `abi3` wheel per platform,
 including musl. That matters more than it sounds: `ruptures` 1.1.9 ships no
@@ -77,6 +104,11 @@ and each timing is the best of as many runs as fit a twenty-second budget —
 which stabilises the fast side, where a single sample swings by more than a
 factor of two. The rows where `ruptures` takes minutes still get one run each,
 so treat the leading digit as the claim and not the third.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Fatin-Ishraq/ruptures-rs/main/assets/speedup-dark.png">
+  <img alt="Horizontal bar chart of measured speedups against ruptures, log scale, ranging from 23x for BottomUp to 4,863x for Dynp on 2,000 samples." src="https://raw.githubusercontent.com/Fatin-Ishraq/ruptures-rs/main/assets/speedup-light.png">
+</picture>
 
 ### Detectors
 
@@ -153,6 +185,12 @@ the part that is a new capability rather than a faster one.
 632x faster, and it finds the 59 regimes the grid steps over.
 
 ## What `Crops` adds
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Fatin-Ishraq/ruptures-rs/main/assets/crops-dark.png">
+  <img alt="The CROPS penalty path: number of change points against penalty, on log axes, as a staircase of 86 optimal segmentations. The widest step is highlighted, showing four changes holding across a 25x span of penalties." src="https://raw.githubusercontent.com/Fatin-Ishraq/ruptures-rs/main/assets/crops-light.png">
+</picture>
+
 
 Penalised detection asks for a penalty, and nobody knows theirs in advance.
 `Crops` implements CROPS (Haynes, Eckley & Fearnhead, 2017) and returns *every*

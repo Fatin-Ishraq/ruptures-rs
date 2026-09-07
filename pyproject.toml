@@ -44,6 +44,11 @@ plot = ["matplotlib"]
 python-source = "python"
 module-name = "ruptures_rs._ruptures_rs"
 features = ["pyo3/extension-module"]
+# The README points at the images by absolute URL so they render on PyPI as
+# well as GitHub, which means half a megabyte of PNGs in the source
+# distribution would be paid for by every person who builds from source and
+# read by nobody.
+exclude = ["assets/**", "bench/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
