@@ -18,6 +18,7 @@ mod crops;
 mod detect;
 mod linalg;
 mod prefix;
+mod stable;
 
 use cost::{
     Cost, CostCLinear, CostKernel, CostKernelLinear, CostL1, CostL2, CostLstsq, CostMl, CostNormal,
@@ -31,16 +32,72 @@ use pyo3::types::PyDict;
 /// Anything bigger than this is refused rather than attempted. Rust aborts the
 /// whole process when an allocation fails, so "try it and see" is not an
 /// option: the user would lose their interpreter, not get an exception.
-const LIMIT_BYTES: usize = 4 << 30; // 4 GiB
+///
+/// The default is 4 GiB per structure. It is a ceiling on one allocation rather
+/// than a promise about peak working memory, and a host with less than that
+/// free will still run out before the check fires — so it is adjustable, with
+/// `ruptures_rs.set_memory_limit()` or the `RUPTURES_RS_MEMORY_LIMIT_GIB`
+/// environment variable. Downwards is the useful direction: a service that
+/// accepts dimensions from a request can refuse hostile ones early.
+const DEFAULT_LIMIT_BYTES: usize = 4 << 30; // 4 GiB
+
+static LIMIT_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_LIMIT_BYTES);
+
+fn limit_bytes() -> usize {
+    LIMIT_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Refuse a structure of `bytes` bytes, whatever its element type.
+fn check_bytes(bytes: usize, what: &str, hint: &str) -> PyResult<()> {
+    let limit = limit_bytes();
+    if bytes > limit {
+        return Err(PyValueError::new_err(format!(
+            "{what} needs {:.2} GiB, over the {:.2} GiB limit. {hint} The limit can be \
+             changed with `ruptures_rs.set_memory_limit()`.",
+            bytes as f64 / (1u64 << 30) as f64,
+            limit as f64 / (1u64 << 30) as f64,
+        )));
+    }
+    Ok(())
+}
 
 fn check_alloc(elems: usize, what: &str, hint: &str) -> PyResult<()> {
-    let bytes = elems.saturating_mul(std::mem::size_of::<f64>());
-    if bytes > LIMIT_BYTES {
-        return Err(PyValueError::new_err(format!(
-            "{what} needs {:.1} GiB, over the {:.0} GiB limit. {hint}",
-            bytes as f64 / (1u64 << 30) as f64,
-            LIMIT_BYTES as f64 / (1u64 << 30) as f64,
-        )));
+    check_bytes(elems.saturating_mul(std::mem::size_of::<f64>()), what, hint)
+}
+
+/// The dynamic program keeps one back-pointer per candidate position per level,
+/// and `KernelCPD` then reads every level back out as its own breakpoint list.
+///
+/// Neither is quadratic in the signal, but both are unbounded in `n_bkps`,
+/// which arrives from the caller: asking a long signal for ten million
+/// breakpoints requests hundreds of gigabytes with nothing else to suggest that
+/// anything is wrong.
+fn check_dynp_memory(n: usize, n_bkps: usize, jump: usize, all_levels: bool) -> PyResult<()> {
+    let cells = (n / jump.max(1)).saturating_add(2);
+    let back = n_bkps
+        .saturating_mul(cells)
+        .saturating_mul(std::mem::size_of::<u32>());
+    check_bytes(
+        back,
+        &format!(
+            "a dynamic program over {n} samples with {n_bkps} breakpoints needs back-pointer \
+             tables, which"
+        ),
+        "Ask for fewer breakpoints, raise `jump`, or subsample the signal.",
+    )?;
+    if all_levels {
+        // Every k from 1 to n_bkps is returned, so the output alone grows with
+        // the square of the number of breakpoints.
+        let out = n_bkps
+            .saturating_mul(n_bkps.saturating_add(3))
+            .saturating_div(2)
+            .saturating_mul(std::mem::size_of::<usize>());
+        check_bytes(
+            out,
+            &format!("returning every segmentation up to {n_bkps} breakpoints, which"),
+            "Ask for fewer breakpoints.",
+        )?;
     }
     Ok(())
 }
@@ -94,6 +151,14 @@ fn as_matrix(arr: &PyReadonlyArrayDyn<f64>) -> PyResult<(Vec<f64>, usize, usize)
         2 => (shape[0], shape[1]),
         _ => return Err(PyValueError::new_err("signal must be 1-D or 2-D")),
     };
+    // A signal with no columns is not a degenerate case to be handled, it is a
+    // mistake: `linear` reads column 0 of it and every kernel takes a row norm
+    // over nothing. Both used to index an empty slice and panic.
+    if d == 0 {
+        return Err(PyValueError::new_err(
+            "signal must have at least one column, got a shape with zero features",
+        ));
+    }
     let total = n
         .checked_mul(d)
         .ok_or_else(|| PyValueError::new_err("signal is too large to index"))?;
@@ -199,7 +264,22 @@ impl CostEngine {
                 check_kernel_memory(n, "cosine", false)?;
                 Box::new(CostKernel::cosine(&sig, n, d, flavor))
             }
-            "rank" => Box::new(CostRank::new(&sig, n, d)),
+            "rank" => {
+                // The prefix arrays here are only O(n * d), but the rank
+                // covariance and its pseudo-inverse are both `d x d`, and the
+                // eigensolver wants a third. A two-row, thirty-thousand-column
+                // signal is under half a megabyte and asks for 6.7 GiB apiece.
+                check_alloc(
+                    d.saturating_mul(d).saturating_mul(3),
+                    &format!(
+                        "the `rank` model needs a {d}x{d} covariance of ranks and its \
+                         pseudo-inverse, which"
+                    ),
+                    "Reduce the number of columns, or use a model whose cost does not depend \
+                     on a covariance, such as `l1` or `l2`.",
+                )?;
+                Box::new(CostRank::new(&sig, n, d))
+            }
             "clinear" => Box::new(CostCLinear::new(&sig, n, d)),
             "mahalanobis" => {
                 check_outer_memory(n, d, "mahalanobis")?;
@@ -233,6 +313,13 @@ impl CostEngine {
                 // whole of `y^T y`.
                 let p = d.saturating_sub(1);
                 check_outer_memory(n, p, "linear")?;
+                // The design and the pre-fitted response are kept too, for the
+                // segments whose Gram matrix cannot decide their rank.
+                check_alloc(
+                    n.saturating_mul(p.saturating_add(1)),
+                    &format!("the `linear` model's {n}x{p} design, which"),
+                    "Subsample the signal, or reduce the number of covariates.",
+                )?;
                 let mut x = vec![0.0; n * p];
                 let mut y = vec![0.0; n];
                 for i in 0..n {
@@ -256,11 +343,24 @@ impl CostEngine {
                 }
                 let p = order + 1;
                 check_outer_memory(n, p, "ar")?;
+                check_alloc(
+                    n.saturating_mul(p.saturating_add(d)),
+                    &format!("the `ar` model's {n}x{p} lagged design, which"),
+                    "Subsample the signal, or lower the order.",
+                )?;
                 // The residual of `y ~ [lags, 1]` is unchanged by shifting the
-                // signal, because the intercept column absorbs the shift. So
-                // centring first is exact, and it keeps the lagged design from
-                // being dominated by an offset.
-                let sig = prefix::center(&sig, n, d);
+                // signal by a constant, because the intercept column absorbs
+                // the shift. So centring first is exact, and it keeps the
+                // lagged design from being dominated by an offset.
+                //
+                // One scalar mean over the whole buffer, not one per column.
+                // The lagged design is built by walking the *flattened* signal,
+                // so with more than one column a row of lags mixes values from
+                // different columns — and per-column offsets do not then move
+                // together, which is what makes the shift absorbable. Removing
+                // a single constant is invariant for any number of columns;
+                // removing d of them silently changed the model.
+                let sig = prefix::center_scalar(&sig, n, d);
                 // ruptures builds the lagged design with `as_strided` over the
                 // flattened buffer, then edge-pads the first `order` rows and
                 // appends an intercept column.
@@ -359,7 +459,9 @@ fn check_params(jump: usize, min_size: usize) -> PyResult<()> {
     if jump == 0 {
         return Err(PyValueError::new_err("jump must be at least 1"));
     }
-    let _ = min_size;
+    if min_size == 0 {
+        return Err(PyValueError::new_err("min_size must be at least 1"));
+    }
     Ok(())
 }
 
@@ -372,6 +474,7 @@ fn dynp(
     min_size: usize,
 ) -> PyResult<Vec<usize>> {
     check_params(jump, min_size)?;
+    check_dynp_memory(engine.n_samples, n_bkps, jump, false)?;
     let out = py.allow_threads(|| {
         detect::dynp(
             engine.inner.as_ref(),
@@ -402,6 +505,7 @@ fn dynp_all(
     min_size: usize,
 ) -> PyResult<Vec<Option<Vec<usize>>>> {
     check_params(jump, min_size)?;
+    check_dynp_memory(engine.n_samples, n_bkps, jump, true)?;
     Ok(py.allow_threads(|| {
         let tables = detect::dynp_tables(
             engine.inner.as_ref(),
@@ -490,6 +594,9 @@ fn window_fit(
     jump: usize,
 ) -> PyResult<(Vec<usize>, Vec<f64>)> {
     check_params(jump, 1)?;
+    if width == 0 {
+        return Err(PyValueError::new_err("width must be at least 1"));
+    }
     Ok(py.allow_threads(|| {
         detect::window_score(engine.inner.as_ref(), engine.n_samples, width, jump)
     }))
@@ -511,6 +618,25 @@ fn window_predict(
     epsilon: Option<f64>,
 ) -> PyResult<Vec<usize>> {
     check_params(jump, min_size)?;
+    // `inds` and `score` come in as plain lists. The estimator that produced
+    // them keeps them consistent, but nothing stops a caller reaching the
+    // extension directly, and `window_seg` reads one at the other's indices.
+    if inds.len() != score.len() {
+        return Err(PyValueError::new_err(format!(
+            "inds and score must be the same length, got {} and {}",
+            inds.len(),
+            score.len()
+        )));
+    }
+    if let Some(&bad) = inds.iter().find(|&&i| i >= engine.n_samples) {
+        return Err(PyValueError::new_err(format!(
+            "window index {bad} is past the end of a signal with {} samples",
+            engine.n_samples
+        )));
+    }
+    if width == 0 {
+        return Err(PyValueError::new_err("width must be at least 1"));
+    }
     Ok(py.allow_threads(|| {
         detect::window_seg(
             engine.inner.as_ref(),
@@ -558,6 +684,38 @@ fn check_outer_memory_py(n: usize, d: usize, model: &str) -> PyResult<()> {
     check_outer_memory(n, d, model)
 }
 
+/// Read the current per-structure allocation ceiling, in bytes.
+#[pyfunction]
+fn get_memory_limit() -> usize {
+    limit_bytes()
+}
+
+/// Set the per-structure allocation ceiling, in bytes.
+///
+/// Lowering it is how a service that takes signal dimensions from a request
+/// makes this library refuse hostile ones at the boundary rather than at the
+/// allocator, where the failure is a process abort rather than an exception.
+#[pyfunction]
+fn set_memory_limit(bytes: usize) -> PyResult<()> {
+    if bytes == 0 {
+        return Err(PyValueError::new_err("the memory limit must be positive"));
+    }
+    LIMIT_BYTES.store(bytes, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+/// Expose the quadratic budget so the Python layer can refuse an `n x n`
+/// matrix of its own before NumPy attempts it.
+#[pyfunction]
+#[pyo3(name = "check_square_memory")]
+fn check_square_memory_py(n: usize, what: &str) -> PyResult<()> {
+    check_alloc(
+        n.saturating_mul(n),
+        &format!("{what} over {n} samples, which"),
+        "Subsample the signal. The engine itself does not need this matrix.",
+    )
+}
+
 #[pyfunction]
 fn sanity_check(n_samples: usize, n_bkps: usize, jump: usize, min_size: usize) -> bool {
     detect::sanity_check(n_samples, n_bkps, jump, min_size)
@@ -577,6 +735,24 @@ fn _ruptures_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(crops_path, m)?)?;
     m.add_function(wrap_pyfunction!(sanity_check, m)?)?;
     m.add_function(wrap_pyfunction!(check_outer_memory_py, m)?)?;
+    m.add_function(wrap_pyfunction!(check_square_memory_py, m)?)?;
+    m.add_function(wrap_pyfunction!(get_memory_limit, m)?)?;
+    m.add_function(wrap_pyfunction!(set_memory_limit, m)?)?;
+    // An environment variable so a limit can be imposed on a process that does
+    // not own the code doing the importing.
+    if let Ok(raw) = std::env::var("RUPTURES_RS_MEMORY_LIMIT_GIB") {
+        match raw.trim().parse::<f64>() {
+            Ok(gib) if gib > 0.0 && gib.is_finite() => {
+                let bytes = (gib * (1u64 << 30) as f64) as usize;
+                LIMIT_BYTES.store(bytes.max(1), std::sync::atomic::Ordering::Relaxed);
+            }
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "RUPTURES_RS_MEMORY_LIMIT_GIB must be a positive number, got {raw:?}"
+                )))
+            }
+        }
+    }
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

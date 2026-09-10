@@ -232,14 +232,20 @@ def test_ar_is_accurate_under_an_offset(offset):
         )
 
 
-def test_the_rank_boundary_is_where_it_is_documented_to_be():
-    """Solving through `XtX` squares the condition number, so the rank decision
-    has a floor NumPy does not have.
+def test_the_rank_decision_agrees_with_numpy_across_conditioning():
+    """Where a design stops being resolvable, and that it is where NumPy says.
 
-    This pins where that floor actually falls, because the README quotes it: a
-    design conditioned at 1e6 is still fitted, and one at 1e8 is reported as
-    rank deficient. If the factorisation changes, this is the number to update
-    in the docs.
+    The fast path solves through `X^T X`, which squares the condition number of
+    `X` and so cannot tell a rank deficiency from a design it merely cannot
+    resolve. Those have different right answers and one of them is `0.0` — a
+    perfect fit, and the most attractive segment a search can find — so the Gram
+    is no longer allowed to guess. When it cannot decide, the segment's design
+    is factorised directly and NumPy's own rule is applied to the singular
+    values NumPy would have seen.
+
+    The result is agreement all the way to the genuine floor: a design at
+    condition 1e13 is fitted by both, and one at 1e15 is called deficient by
+    both. This test is the one to read if the factorisation ever changes.
     """
     rng = np.random.default_rng(0)
     n, seg = 400, 60
@@ -247,12 +253,32 @@ def test_the_rank_boundary_is_where_it_is_documented_to_be():
     c1 = rng.normal(size=n)
     c2 = rng.normal(size=n)
 
-    def residual(scale):
+    def pair(scale):
         sig = np.c_[y, c1, c1 * 3.0 + scale * c2]
-        return rpt_rs.CostLinear().fit(sig).error(0, seg)
+        ours = rpt_rs.CostLinear().fit(sig).error(0, seg)
+        design = sig[:seg, 1:]
+        _, residual, _, _ = np.linalg.lstsq(design, sig[:seg, 0], rcond=None)
+        return ours, float(np.sum(residual)), float(np.linalg.cond(design))
 
-    assert residual(1e-5) > 1.0, "a design conditioned at ~1e6 should be fitted"
-    assert residual(1e-8) == 0.0, "a design conditioned at ~1e8 should be refused"
+    for scale in (1e-3, 1e-5, 1e-8, 1e-10, 1e-12):
+        ours, theirs, cond = pair(scale)
+        assert theirs > 1.0, "the reference should still be fitting this design"
+        # Two different factorisations of the same ill-conditioned design agree
+        # to about `eps * cond`, and no better: that is what conditioning means.
+        # Demanding more would be asserting that one of them is exact.
+        tol = max(1e-9, 20 * np.finfo(float).eps * cond)
+        assert abs(ours - theirs) <= tol * theirs, (
+            "at scale {:g} (cond {:.1e}) we report {!r} where NumPy reports {!r}".format(
+                scale, cond, ours, theirs
+            )
+        )
+
+    # Past the floor both give up, and give up the same way.
+    for scale in (1e-14, 1e-16, 0.0):
+        ours, theirs, _ = pair(scale)
+        assert ours == 0.0 and theirs == 0.0, (
+            "at scale {:g}: {!r} vs {!r}".format(scale, ours, theirs)
+        )
 
 
 def test_rank_deficient_design_reports_no_residual():
@@ -279,3 +305,83 @@ def test_variance_is_never_negative_or_a_silent_zero():
     poisoned = sig.copy()
     poisoned[100, 0] = np.nan
     assert np.isnan(rpt_rs.CostL2().fit(poisoned).error(90, 120))
+
+
+# ------------------------------------------------- cancellation, not centring
+
+
+@pytest.mark.parametrize(
+    "model,amplitude,expected", [("l2", 1e10, 82.5), ("l1", 1e18, 25.0)]
+)
+def test_local_detail_survives_an_unrelated_large_regime(model, amplitude, expected):
+    """A small regime beside a huge one must still be scored on its own terms.
+
+    Centring the signal by its global mean is what makes the prefix-sum form
+    accurate, and it only works when there *is* one level to centre on. Here
+    there are two, sixteen orders of magnitude apart, and the second regime's
+    cost is smaller than the last representable bit of the prefix that contains
+    it: `l2` returned `0.0` for a segment whose cost is 82.5, which reads as a
+    perfect fit and pulls breakpoints towards it.
+
+    `l1` failed one step earlier — the centring itself rounded the local detail
+    away, because at 1e18 the samples 0..49 all map to the same double. It no
+    longer centres, having nothing to gain from it: a median and a sum of
+    absolute deviations are exact at any magnitude.
+    """
+    signal = np.r_[np.full(50, amplitude), np.arange(50.0)]
+    got = rpt_rs.cost_factory(model).fit(signal).error(50, 60)
+    assert got == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("offset", [0.0, 1e3, 1e6, 1e9])
+@pytest.mark.parametrize("model", ["l2", "l1", "normal", "mahalanobis"])
+def test_costs_are_invariant_under_a_shift(model, offset):
+    """Every one of these costs is defined on deviations, so an offset is not
+    supposed to be visible in the answer.
+
+    The offsets stop at 1e9 because past that the *input* stops carrying the
+    answer: at 1e12 the spacing of doubles is 2.4e-4, so unit-scale deviations
+    are quantised on the way in and `base + offset` is a genuinely different
+    signal from `base`. No cost function can recover what the array no longer
+    holds, and demanding that it does would be testing floating point rather
+    than this package. What the offsets here do check is that nothing *else*
+    goes wrong on the way — which is where `clinear`, `ar` and `linear` were
+    each losing digits before, and where `l1` was losing all of them.
+    """
+    rng = np.random.default_rng(4)
+    base = rng.normal(size=(120, 2))
+    plain = rpt_rs.cost_factory(model).fit(base).error(20, 80)
+    shifted = rpt_rs.cost_factory(model).fit(base + offset).error(20, 80)
+    assert shifted == pytest.approx(plain, rel=1e-6, abs=1e-9)
+
+
+@pytest.mark.parametrize("scale", [1e80, 1e-100])
+def test_linear_residual_is_invariant_under_predictor_scaling(scale):
+    """Multiplying a design by a constant does not make it ill conditioned.
+
+    The eigensolver's convergence test sums squared entries, and at these scales
+    that sum overflowed at one end and underflowed to zero at the other. Both
+    stopped the sweep before anything had been diagonalised, and the residual
+    came back wrong — 1.29 where NumPy says 0.544 — with nothing to indicate it.
+    """
+    rng = np.random.default_rng(42)
+    design = rng.normal(size=(60, 2))
+    response = 2 * design[:, 0] - design[:, 1] + rng.normal(size=60) * 0.1
+    _, residual, _, _ = np.linalg.lstsq(design * scale, response, rcond=None)
+    got = rpt_rs.CostLinear().fit(np.c_[response, design * scale]).error(0, 60)
+    assert got == pytest.approx(float(residual.sum()), rel=1e-9)
+
+
+def test_multivariate_ar_matches_the_reference():
+    """`ar` builds its lagged design by walking the flattened signal.
+
+    With more than one column a row of lags therefore spans a column boundary,
+    and subtracting a *per-column* mean first — which is exact for one column,
+    because the intercept absorbs it — silently changed the model. One scalar
+    mean over the whole buffer is absorbed for any number of columns.
+    """
+    rpt_py = pytest.importorskip("ruptures", reason="reference not installable here")
+    signal = np.random.default_rng(5).normal(size=(40, 2))
+    ours = rpt_rs.CostAR(order=2).fit(signal).error(5, 35)
+    theirs = rpt_py.costs.CostAR(order=2).fit(signal.copy()).error(5, 35)
+    assert ours == pytest.approx(theirs, rel=1e-9)

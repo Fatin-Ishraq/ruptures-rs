@@ -13,6 +13,12 @@
 //!    before any prefix array is built. Sums of squared deviations are invariant
 //!    under this shift, so the answer is unchanged while the cancellation
 //!    becomes negligible for realistic data.
+//!
+//!    It is a mitigation, not a bound. A segment far from the *global* mean —
+//!    a small late regime after a much larger one — is still differenced out of
+//!    prefix values that dwarf it, and no amount of care in the accumulation
+//!    recovers digits the prefix array never had room to store. That case is
+//!    detected and recomputed exactly; see [`crate::stable`].
 //! 2. **Detrending**, for the costs that are invariant under it. `clinear`
 //!    compares a signal to a straight line, so it is invariant under
 //!    subtracting *any* affine function of the sample index — and a trending
@@ -85,6 +91,16 @@ impl Prefix1 {
     #[inline]
     pub fn seg(&self, start: usize, end: usize, j: usize) -> f64 {
         self.data[end * self.d + j] - self.data[start * self.d + j]
+    }
+
+    /// The accumulated prefix value itself, `sum(column j over rows 0..i)`.
+    ///
+    /// A segment sum is a difference of two of these, so its absolute rounding
+    /// error is set by *their* magnitude rather than by its own — which is the
+    /// whole of the cancellation problem `stable` exists to detect.
+    #[inline]
+    pub fn at(&self, i: usize, j: usize) -> f64 {
+        self.data[i * self.d + j]
     }
 }
 
@@ -160,6 +176,26 @@ pub fn subtract_means(sig: &[f64], n: usize, d: usize, means: &[f64]) -> Vec<f64
 /// nothing but removes the dominant source of cancellation.
 pub fn center(sig: &[f64], n: usize, d: usize) -> Vec<f64> {
     subtract_means(sig, n, d, &column_means(sig, n, d))
+}
+
+/// Subtract one scalar — the mean of every value in the matrix — from all of it.
+///
+/// For a cost whose model carries an intercept, shifting the *whole* signal by
+/// a constant is exactly absorbed and the residual is unchanged. Shifting each
+/// column by its own mean is not, once the design mixes columns: `ar` builds
+/// its lags by walking the flattened buffer, so a row can span a column
+/// boundary, and per-column offsets do not cancel across one.
+pub fn center_scalar(sig: &[f64], n: usize, d: usize) -> Vec<f64> {
+    let total = n * d;
+    if total == 0 {
+        return Vec::new();
+    }
+    let mut acc = Neumaier::new();
+    for &v in sig.iter().take(total) {
+        acc.add(v);
+    }
+    let mean = acc.value() / total as f64;
+    sig.iter().take(total).map(|v| v - mean).collect()
 }
 
 /// Subtract the per-column global least-squares line in the sample index.

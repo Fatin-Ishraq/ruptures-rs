@@ -28,6 +28,7 @@ use crate::linalg;
 use crate::prefix::{
     center, column_means, detrend_affine, subtract_means, Cumsum2, Neumaier, Prefix1, PrefixOuter,
 };
+use crate::stable;
 use std::cell::RefCell;
 
 /// The two O(1) block quantities a kernel dynamic program needs: the trace of
@@ -83,6 +84,10 @@ pub trait Cost: Send + Sync {
 // ---------------------------------------------------------------- l2
 
 pub struct CostL2 {
+    /// The signal as it arrived. Held so a segment whose prefix difference has
+    /// cancelled away can be reduced directly; see [`crate::stable`].
+    raw: Vec<f64>,
+    runs: stable::ConstantRuns,
     s1: Prefix1,
     s2: Prefix1,
     d: usize,
@@ -93,9 +98,39 @@ impl CostL2 {
         let y = center(sig, n, d);
         let sq: Vec<f64> = y.iter().map(|v| v * v).collect();
         Self {
+            raw: sig.to_vec(),
+            runs: stable::ConstantRuns::build(sig, n, d),
             s1: Prefix1::build(&y, n, d),
             s2: Prefix1::build(&sq, n, d),
             d,
+        }
+    }
+
+    /// Sum of squared deviations of column `j` over `start..end`, by prefix
+    /// difference where that still means something and by direct reduction
+    /// where it does not.
+    #[inline]
+    fn ssd(&self, start: usize, end: usize, j: usize, len: f64) -> f64 {
+        let s1 = self.s1.seg(start, end, j);
+        let s2 = self.s2.seg(start, end, j);
+        let approx = s2 - s1 * s1 / len;
+        let err = stable::ssd_error(
+            s1,
+            len,
+            self.s1.at(start, j),
+            self.s1.at(end, j),
+            self.s2.at(end, j),
+        );
+        if stable::trustworthy(approx, err) {
+            approx
+        } else if self.runs.is_constant(start, end, j) {
+            // Flat, therefore exactly zero, and no need to look at it. This is
+            // not a shortcut for the sake of one number: a piecewise-constant
+            // signal makes every interior segment flat, and without it the
+            // check below would run for every cell of the dynamic program.
+            0.0
+        } else {
+            stable::segment_ssd(&self.raw, self.d, j, start, end)
         }
     }
 }
@@ -115,14 +150,7 @@ impl Cost for CostL2 {
         // NumPy so the two agree to the last few ulp.
         let mut var_sum = 0.0;
         for j in 0..self.d {
-            let s1 = self.s1.seg(start, end, j);
-            let s2 = self.s2.seg(start, end, j);
-            // A sum of squared deviations cannot be negative; the prefix-sum
-            // identity can still land a few ulp below zero on a segment that
-            // is exactly constant, where NumPy's two-pass reduction returns a
-            // clean zero. Clamping restores the invariant `error >= 0`.
-            let ssd = clamp_nonneg(s2 - s1 * s1 / n);
-            var_sum += ssd / n;
+            var_sum += self.ssd(start, end, j, n) / n;
         }
         var_sum * n
     }
@@ -140,9 +168,18 @@ pub struct CostL1 {
 }
 
 impl CostL1 {
+    /// The signal is stored as it arrived, deliberately.
+    ///
+    /// `l1` has no prefix array and so no cancellation to defend against: it
+    /// takes a median and sums `|x - median|`, and both are exact on values of
+    /// any magnitude — the subtraction of two nearby doubles is exact. Centring
+    /// could only *lose* information, and on a signal at `1e18` it loses all of
+    /// it: the offset is so much larger than the local detail that the shifted
+    /// values all round to the same double and every segment scores zero.
     pub fn new(sig: &[f64], n: usize, d: usize) -> Self {
+        let _ = n;
         Self {
-            sig: center(sig, n, d),
+            sig: sig.to_vec(),
             d,
         }
     }
@@ -179,7 +216,10 @@ impl Cost for CostL1 {
 // ---------------------------------------------------------------- normal
 
 pub struct CostNormal {
+    raw: Vec<f64>,
+    runs: stable::ConstantRuns,
     s1: Prefix1,
+    s2: Prefix1,
     outer: PrefixOuter,
     d: usize,
     add_small_diag: bool,
@@ -188,11 +228,61 @@ pub struct CostNormal {
 impl CostNormal {
     pub fn new(sig: &[f64], n: usize, d: usize, add_small_diag: bool) -> Self {
         let y = center(sig, n, d);
+        let sq: Vec<f64> = y.iter().map(|v| v * v).collect();
         Self {
+            raw: sig.to_vec(),
+            runs: stable::ConstantRuns::build(sig, n, d),
             s1: Prefix1::build(&y, n, d),
+            s2: Prefix1::build(&sq, n, d),
             outer: PrefixOuter::build(&y, n, d),
             d,
             add_small_diag,
+        }
+    }
+}
+
+/// Fill `out` with the segment scatter matrix `sum_i (x_i - mean)(x_i - mean)^T`.
+///
+/// Computed by prefix difference, and checked: if any entry has been reduced to
+/// rounding noise — or to a NaN carried in from outside the segment — the whole
+/// block is recomputed directly from `raw`. Returns nothing; the decision is
+/// invisible to the caller beyond the answer being right.
+///
+/// The check is per entry rather than on the block as a whole because a
+/// covariance can be perfectly well determined in one direction and cancelled
+/// away in another, and it is the whole matrix that then goes to the Cholesky.
+impl CostNormal {
+    fn scatter_checked(&self, start: usize, end: usize, out: &mut [f64]) {
+        let d = self.d;
+        let len = (end - start) as f64;
+        self.outer.seg_into(start, end, out);
+        let mut sums = vec![0.0; d];
+        for (j, slot) in sums.iter_mut().enumerate() {
+            *slot = self.s1.seg(start, end, j);
+        }
+        let mut ok = true;
+        for a in 0..d {
+            for b in 0..d {
+                let v = out[a * d + b] - sums[a] * sums[b] / len;
+                let err = stable::scatter_error(
+                    self.s2.at(end, a),
+                    self.s2.at(end, b),
+                    sums[a],
+                    sums[b],
+                    len,
+                );
+                // The diagonal is a sum of squares and must clear the guard on its
+                // own sign; off-diagonals may legitimately be negative, so they are
+                // judged on magnitude.
+                let judged = if a == b { v } else { v.abs() };
+                if !stable::trustworthy(judged, err) {
+                    ok = false;
+                }
+                out[a * d + b] = v;
+            }
+        }
+        if !ok {
+            stable::segment_scatter(&self.raw, d, start, end, out);
         }
     }
 }
@@ -213,31 +303,44 @@ impl Cost for CostNormal {
             let s1 = self.s1.seg(start, end, 0);
             let mut sq = [0.0f64; 1];
             self.outer.seg_into(start, end, &mut sq);
-            // Clamped for the same reason as `CostL2`: on an exactly constant
-            // segment the one-pass identity can go a few ulp negative, and the
-            // logarithm turns that into a NaN where `ruptures` sees a clean
-            // zero variance.
-            let mut var = clamp_nonneg((sq[0] - s1 * s1 / n) / n);
+            let approx = sq[0] - s1 * s1 / n;
+            let err = stable::ssd_error(
+                s1,
+                n,
+                self.s1.at(start, 0),
+                self.s1.at(end, 0),
+                self.s2.at(end, 0),
+            );
+            let ssd = if stable::trustworthy(approx, err) {
+                approx
+            } else if self.runs.is_constant(start, end, 0) {
+                0.0
+            } else {
+                stable::segment_ssd(&self.raw, 1, 0, start, end)
+            };
+            let mut var = ssd / n;
             if self.add_small_diag {
                 var += 1e-6;
             }
             return var.ln() * n;
         }
         let mut cov = vec![0.0; d * d];
-        self.outer.seg_into(start, end, &mut cov);
-        let mut mean = vec![0.0; d];
-        for (j, m) in mean.iter_mut().enumerate() {
-            *m = self.s1.seg(start, end, j) / n;
-        }
-        for a in 0..d {
-            for b in 0..d {
-                cov[a * d + b] = (cov[a * d + b] - n * mean[a] * mean[b]) / (n - 1.0);
-            }
+        self.scatter_checked(start, end, &mut cov);
+        for v in cov.iter_mut() {
+            *v /= n - 1.0;
         }
         if self.add_small_diag {
             for i in 0..d {
                 cov[i * d + i] += 1e-6;
             }
+        }
+        // A non-finite covariance is not a degenerate distribution, it is
+        // corrupt input, and the two must not share an answer. `-inf` is the
+        // most attractive score a segment can have, so mapping a NaN onto it
+        // makes a detector seek out the damage. `numpy.linalg.slogdet` returns
+        // NaN here and `ruptures` passes that straight through.
+        if cov.iter().any(|v| v.is_nan()) {
+            return f64::NAN;
         }
         match linalg::logdet_spd(&mut cov, d) {
             Some(v) => v * n,
@@ -255,7 +358,10 @@ impl Cost for CostNormal {
 /// `sum_i (x_i - mu)^T M (x_i - mu)`, so prefix sums of `x` and `x x^T` give the
 /// same number in O(d^2) with no quadratic memory at all.
 pub struct CostMl {
+    raw: Vec<f64>,
+    runs: stable::ConstantRuns,
     s1: Prefix1,
+    s2: Prefix1,
     outer: PrefixOuter,
     metric: Vec<f64>,
     d: usize,
@@ -264,8 +370,12 @@ pub struct CostMl {
 impl CostMl {
     pub fn new(sig: &[f64], n: usize, d: usize, metric: Vec<f64>) -> Self {
         let y = center(sig, n, d);
+        let sq: Vec<f64> = y.iter().map(|v| v * v).collect();
         Self {
+            raw: sig.to_vec(),
+            runs: stable::ConstantRuns::build(sig, n, d),
             s1: Prefix1::build(&y, n, d),
+            s2: Prefix1::build(&sq, n, d),
             outer: PrefixOuter::build(&y, n, d),
             metric,
             d,
@@ -303,7 +413,32 @@ impl Cost for CostMl {
                 quad += s[a] * self.metric[a * d + b] * s[b];
             }
         }
-        trace - quad / n
+        let approx = trace - quad / n;
+        // The two terms are each O(sum x^2) and their difference is O(segment
+        // spread), so this is the same cancellation `CostL2` faces, weighted by
+        // the metric. Bound it the same way and recompute from the centred
+        // scatter when nothing survives.
+        let mut err = 0.0;
+        for a in 0..d {
+            for b in 0..d {
+                err += self.metric[a * d + b].abs()
+                    * stable::scatter_error(self.s2.at(end, a), self.s2.at(end, b), s[a], s[b], n);
+            }
+        }
+        if stable::trustworthy(approx, err) {
+            return approx;
+        }
+        if self.runs.all_constant(start, end) {
+            return 0.0;
+        }
+        stable::segment_scatter(&self.raw, d, start, end, &mut scatter);
+        let mut exact = 0.0;
+        for a in 0..d {
+            for b in 0..d {
+                exact += self.metric[a * d + b] * scatter[b * d + a];
+            }
+        }
+        exact
     }
 }
 
@@ -546,7 +681,10 @@ impl Cost for CostKernel {
 /// is arithmetically the extension it replaces, while still costing O(n*d)
 /// memory rather than O(n^2).
 pub struct CostKernelLinear {
+    raw: Vec<f64>,
+    runs: stable::ConstantRuns,
     s1: Prefix1,
+    s2: Prefix1,
     sq: Prefix1,
     d: usize,
 }
@@ -563,8 +701,12 @@ impl CostKernelLinear {
                 acc
             })
             .collect();
+        let colsq: Vec<f64> = y.iter().map(|v| v * v).collect();
         Self {
+            raw: sig.to_vec(),
+            runs: stable::ConstantRuns::build(sig, n, d),
             s1: Prefix1::build(&y, n, d),
+            s2: Prefix1::build(&colsq, n, d),
             sq: Prefix1::build(&rowsq, n, 1),
             d,
         }
@@ -602,11 +744,31 @@ impl Cost for CostKernelLinear {
         let n = (end - start) as f64;
         let trace = self.sq.seg(start, end, 0);
         let mut block = 0.0;
+        let mut err = 0.0;
         for j in 0..self.d {
             let s = self.s1.seg(start, end, j);
             block += s * s;
+            err += stable::ssd_error(
+                s,
+                n,
+                self.s1.at(start, j),
+                self.s1.at(end, j),
+                self.s2.at(end, j),
+            );
         }
-        clamp_nonneg(trace - block / n)
+        let approx = trace - block / n;
+        if stable::trustworthy(approx, err) {
+            return approx;
+        }
+        if self.runs.all_constant(start, end) {
+            return 0.0;
+        }
+        // Same quantity as `CostL2`, grouped as the C extension groups it.
+        let mut total = 0.0;
+        for j in 0..self.d {
+            total += stable::segment_ssd(&self.raw, self.d, j, start, end);
+        }
+        total
     }
 }
 
@@ -722,6 +884,11 @@ impl Cost for CostRank {
 ///
 /// The rank test is NumPy's, not Cholesky's: see [`linalg::lstsq_factor`].
 pub struct CostLstsq {
+    /// The design and the pre-fitted response, kept so that a segment whose
+    /// Gram matrix cannot decide its rank can be factorised directly. See
+    /// [`linalg::lstsq_residual_svd`].
+    x: Vec<f64>,
+    resid: Vec<f64>,
     cxx: PrefixOuter,
     cx: Prefix1,
     cxe: Vec<Prefix1>,
@@ -762,7 +929,10 @@ impl CostLstsq {
             }
         }
         let mut beta0 = vec![0.0; ny * p];
-        if let Some(factor) = linalg::lstsq_factor(&g0, p, n) {
+        // A design the Gram cannot resolve simply gets no pre-fit: the removal
+        // is an exact identity on the residual, so skipping it costs accuracy
+        // rather than correctness.
+        if let linalg::Lstsq::Ready(factor) = linalg::lstsq_factor(&g0, p, n) {
             let mut rhs = vec![0.0; p];
             let mut out = vec![0.0; p];
             for c in 0..ny {
@@ -813,6 +983,8 @@ impl CostLstsq {
         let esq: Vec<f64> = ce_vals.iter().map(|v| v * v).collect();
 
         Self {
+            x: x.to_vec(),
+            resid: resid.clone(),
             cxx: PrefixOuter::build(&cx_vals, n, p),
             cx: Prefix1::build(&cx_vals, n, p),
             cxe,
@@ -861,8 +1033,17 @@ impl Cost for CostLstsq {
         // deficient rank it returns an empty residual for every response
         // column at once, which `ruptures` sums to 0.0.
         let factor = match linalg::lstsq_factor(&gram, p, len) {
-            Some(f) => f,
-            None => return 0.0,
+            linalg::Lstsq::Ready(f) => f,
+            linalg::Lstsq::NoResidual => return 0.0,
+            // The Gram has squared away the difference between "rank deficient"
+            // and "merely ill conditioned". Those have different answers and
+            // one of them is `0.0`, so the design gets factorised properly
+            // rather than being written off. O(len * p^2), for the segments
+            // that need it.
+            linalg::Lstsq::Unresolvable => {
+                return linalg::lstsq_residual_svd(&self.x, &self.resid, p, self.ny, start, end)
+                    .unwrap_or(0.0)
+            }
         };
 
         let mut total = 0.0;

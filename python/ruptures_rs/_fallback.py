@@ -19,7 +19,7 @@ from bisect import bisect_left
 from functools import lru_cache
 from math import floor
 
-from .utils import pairwise, sanity_check
+from .utils import Bnode, pairwise, sanity_check
 
 
 def dynp(cost, n_samples, n_bkps, jump, min_size):
@@ -46,30 +46,57 @@ def dynp(cost, n_samples, n_bkps, jump, min_size):
 
 
 def pelt(cost, n_samples, pen, jump, min_size):
+    """PELT, with the same repair to its pruning as the compiled path.
+
+    A candidate `t` may be discarded at target `s` once
+    ``F(t) + C(t, s) >= F(s)``, because from then on the chain
+    ``F(t) + C(t, u) + pen >= F(s) + C(s, u) + pen >= F(u)`` holds for every
+    later target `u`. The last step needs `s` to be a legal last breakpoint for
+    `u`, which it is not while ``u - s < min_size`` — so removal waits until it
+    is. See `detect.rs` for the counterexample this fixes and
+    `docs/differences.md` for what it means for agreement with `ruptures`.
+
+    The two paths have to agree with each other before either can be compared
+    with anything else: `accelerated` is meant to describe how an answer was
+    reached, not which answer it is.
+    """
     partitions = {0: {(0, 0): 0.0}}
+    # (position, target at which it failed the pruning test or None)
     admissible = []
     ind = [k for k in range(0, n_samples, jump) if k >= min_size]
     ind += [n_samples]
     for bkp in ind:
+        admissible = [
+            (t, pruned_at)
+            for t, pruned_at in admissible
+            if pruned_at is None or bkp - pruned_at < min_size
+        ]
         new_adm_pt = floor((bkp - min_size) / jump) * jump
-        admissible.append(new_adm_pt)
+        admissible.append((new_adm_pt, None))
         subproblems = []
-        for t in admissible:
+        for slot, (t, _) in enumerate(admissible):
             try:
                 tmp = partitions[t].copy()
             except KeyError:
                 continue
             tmp[(t, bkp)] = cost.error(t, bkp) + pen
-            subproblems.append(tmp)
+            subproblems.append((slot, tmp))
         if not subproblems:
             continue
-        partitions[bkp] = min(subproblems, key=lambda d: sum(d.values()))
+        partitions[bkp] = min(subproblems, key=lambda pair: sum(pair[1].values()))[1]
         best = sum(partitions[bkp].values())
-        admissible = [
-            t
-            for t, part in zip(admissible, subproblems)
-            if sum(part.values()) <= best + pen
-        ]
+        verdict = {slot: sum(part.values()) <= best + pen for slot, part in subproblems}
+        kept = []
+        for slot, (t, pruned_at) in enumerate(admissible):
+            if slot not in verdict:
+                # A position below `min_size` never receives a partition of its
+                # own, so it can never contribute to one.
+                continue
+            if verdict[slot]:
+                kept.append((t, pruned_at))
+            else:
+                kept.append((t, bkp if pruned_at is None else pruned_at))
+        admissible = kept
     best_partition = partitions[n_samples].copy()
     best_partition.pop((0, 0), None)
     return sorted(e for _, e in best_partition.keys())
@@ -292,3 +319,77 @@ def window_seg(
             bkps.sort()
             error = cost.sum_of_costs(bkps)
     return bkps
+
+
+# ------------------------------------------------------------------ the
+# compatibility surface. `ruptures` exposes several of its internals as public
+# methods — `Dynp.seg`, `Binseg.single_bkp`, `BottomUp.leaves` and `.merge` —
+# and code in the wild calls and overrides them. The accelerated search does not
+# use any of them, so they are answered from here rather than duplicated.
+
+
+def dynp_seg(cost, jump, min_size, start, end, n_bkps):
+    """`Dynp.seg`: the optimal partition of `[start, end)`, as a dict."""
+
+    @lru_cache(maxsize=None)
+    def seg(start, end, k):
+        if k == 0:
+            return ((start, end),), cost.error(start, end)
+        best = None
+        bkp = start
+        while bkp < end:
+            if bkp % jump == 0:
+                if (
+                    sanity_check(bkp - start, k - 1, jump, min_size)
+                    and end - bkp >= min_size
+                ):
+                    left_keys, left_val = seg(start, bkp, k - 1)
+                    total = left_val + cost.error(bkp, end)
+                    if best is None or total < best[1]:
+                        best = (left_keys + ((bkp, end),), total)
+            bkp += 1
+        if best is None:
+            raise AssertionError("No admissible last breakpoints found.")
+        return best
+
+    keys, _ = seg(start, end, n_bkps)
+    return {(s, e): cost.error(s, e) for s, e in keys}
+
+
+def binseg_single_bkp(cost, jump, min_size, start, end):
+    """`Binseg.single_bkp`: the best split of `[start, end)` and its gain."""
+    segment_cost = cost.error(start, end)
+    if segment_cost == float("-inf"):
+        return None, 0
+    gain_list = []
+    for bkp in range(start, end, jump):
+        if bkp - start >= min_size and end - bkp >= min_size:
+            gain = segment_cost - cost.error(start, bkp) - cost.error(bkp, end)
+            gain_list.append((gain, bkp))
+    if not gain_list:
+        return None, 0
+    gain, bkp = max(gain_list)
+    return bkp, gain
+
+
+def grow_tree(cost, n_samples, jump, min_size):
+    """`BottomUp.leaves`: the over-segmented starting partition."""
+    partition = [(-n_samples, (0, n_samples))]
+    stop = False
+    while not stop:
+        stop = True
+        _, (start, end) = partition[0]
+        mid = (start + end) * 0.5
+        candidates = [
+            bkp
+            for bkp in range(start, end)
+            if bkp % jump == 0 and bkp - start >= min_size and end - bkp >= min_size
+        ]
+        if candidates:
+            bkp = min(candidates, key=lambda x: abs(x - mid))
+            heapq.heappop(partition)
+            heapq.heappush(partition, (-bkp + start, (start, bkp)))
+            heapq.heappush(partition, (-end + bkp, (bkp, end)))
+            stop = False
+    partition.sort(key=lambda x: x[1])
+    return [Bnode(s, e, cost.error(s, e)) for _, (s, e) in partition]

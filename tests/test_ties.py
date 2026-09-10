@@ -12,7 +12,9 @@ than "we happen to agree" and can be stated without hedging:
 
 * for the exact detectors (`Dynp`, and `Pelt` at a fixed penalty), the
   segmentation returned here costs no more than the one `ruptures` returns,
-  measured with `ruptures`' own cost function;
+  measured with `ruptures`' own cost function — and for `Pelt` it is sometimes
+  strictly less, because the reference prunes a candidate from a point at which
+  pruning it is not yet justified and this package does not;
 * for the greedy detectors (`Binseg`, `BottomUp`), only that the answer stays
   well-formed and in the same league, because neither is optimising globally
   and a tie broken the other way sends the greedy path elsewhere;
@@ -71,6 +73,24 @@ def reference_cost(sig, model, bkps):
         sum(
             float(np.asarray(cost.error(start, end)).sum())
             for start, end in zip([0] + list(bkps), bkps)
+        )
+    )
+
+
+def assert_not_worse(sig, model, actual, expected, detector, pen):
+    """Our penalised objective must be no larger than the reference's.
+
+    Scored with `ruptures`' own cost function, and with the penalty included,
+    because a penalised search is not comparable without it: a segmentation with
+    fewer breakpoints has a smaller unpenalised cost almost by construction.
+    """
+    ours = reference_cost(sig, model, actual) + pen * len(actual)
+    theirs = reference_cost(sig, model, expected) + pen * len(expected)
+    scale = max(abs(ours), abs(theirs), 1.0)
+    assert ours <= theirs + 1e-9 * scale, (
+        "{} {}: ruptures-rs returned a strictly worse segmentation "
+        "({} at penalised cost {!r}, reference {} at {!r})".format(
+            detector, model, actual, ours, expected, theirs
         )
     )
 
@@ -140,15 +160,7 @@ def test_exact_detectors_never_cost_more_on_tied_signals(detector, kind, trial):
     assert exc_got == exc_ref, "{} {}: {} vs {}".format(detector, model, exc_ref, exc_got)
     if expected is None or expected == actual:
         return
-    ours = reference_cost(sig, model, actual)
-    theirs = reference_cost(sig, model, expected)
-    scale = max(abs(ours), abs(theirs), 1.0)
-    assert ours <= theirs + 1e-9 * scale, (
-        "{} {}: ruptures-rs returned a strictly worse segmentation "
-        "({} at cost {!r}, reference {} at cost {!r})".format(
-            detector, model, actual, ours, expected, theirs
-        )
-    )
+    assert_not_worse(sig, model, actual, expected, detector, kwargs.get("pen", 0.0))
 
 
 @pytest.mark.parametrize("detector", GREEDY_DETECTORS)
@@ -181,12 +193,19 @@ def test_greedy_detectors_stay_close_on_tied_signals(detector, kind, trial):
 
 @pytest.mark.parametrize("trial", range(30))
 def test_integer_signals_match_exactly(trial):
-    """Small-alphabet data does agree breakpoint for breakpoint.
+    """Small-alphabet data agrees breakpoint for breakpoint, or wins.
 
     This is a regression guard, not a coincidence: it agrees because `Pelt`
     folds its penalty in per segment the way summing a partition dict does, and
     because a sum of squared deviations is clamped at zero rather than being
     allowed a few ulp below it. Both of those were wrong once.
+
+    `Pelt` is the exception, and deliberately so. Its pruning here is valid
+    under `min_size` where the reference's is not, so on data with this many
+    ties it sometimes finds a segmentation the reference has already discarded.
+    The assertion for it is therefore "never worse", which is the property that
+    matters; `test_optimality.py` proves the stronger claim against an
+    exhaustive search.
     """
     rng = np.random.default_rng(7000 + trial)
     n = int(rng.integers(40, 200))
@@ -203,6 +222,9 @@ def test_integer_signals_match_exactly(trial):
     )
     expected, actual, exc_ref, exc_got = run_pair(detector, sig, est, kwargs)
     assert exc_got == exc_ref
+    if detector == "Pelt" and expected is not None and actual != expected:
+        assert_not_worse(sig, model, actual, expected, detector, kwargs["pen"])
+        return
     assert actual == expected, "{} {} n={}".format(detector, model, n)
 
 
@@ -279,6 +301,9 @@ def test_noisy_signals_agree_or_tie(trial):
     expected, actual, exc_ref, exc_got = run_pair(detector, sig, est, kwargs)
     assert exc_got == exc_ref
     if expected is None or expected == actual:
+        return
+    if detector == "Pelt":
+        assert_not_worse(sig, model, actual, expected, detector, kwargs["pen"])
         return
     ours = reference_cost(sig, model, actual)
     theirs = reference_cost(sig, model, expected)

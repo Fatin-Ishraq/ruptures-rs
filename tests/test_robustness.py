@@ -423,3 +423,145 @@ def test_kernelcpd_fills_every_smaller_segmentation():
     for k, bkps in est.segmentations_dict.items():
         assert len(bkps) == k + 1
         assert bkps[-1] == 200
+
+
+# ------------------------------------------------- dispatch and fitted state
+
+
+def test_a_subclass_that_overrides_error_is_not_accelerated():
+    """`isinstance` is the wrong question to ask a cost object.
+
+    A subclass of `CostL2` that redefines `error` still passes `isinstance`, and
+    still has an L2 engine attached — an engine that knows nothing about the
+    override. Accelerating it meant the search optimised one function while
+    `sum_of_costs` reported another, with no sign that the two had parted ways.
+    """
+
+    class ZeroCost(rpt.CostL2):
+        def error(self, start, end):
+            return 0.0
+
+    signal = np.r_[np.zeros(20), np.full(20, 10.0)]
+    estimator = rpt.Pelt(custom_cost=ZeroCost(), jump=1).fit(signal)
+    assert estimator.accelerated is False
+    # Every segmentation costs zero, so adding a breakpoint only adds penalty.
+    assert estimator.predict(1.0) == [40]
+
+
+def test_a_subclass_that_changes_nothing_is_still_accelerated():
+    """The test is on the semantics, not on the name: a subclass that only adds
+    a docstring or an attribute has not changed the arithmetic."""
+
+    class Tagged(rpt.CostL2):
+        """Same cost, different label."""
+
+        tag = "mine"
+
+    signal = np.r_[np.zeros(20), np.full(20, 10.0)]
+    estimator = rpt.Pelt(custom_cost=Tagged(), jump=1).fit(signal)
+    assert estimator.accelerated is True
+    assert estimator.predict(1.0) == [20, 40]
+
+
+def test_a_failed_refit_leaves_the_old_fit_intact():
+    """Half-replaced state is worse than no state.
+
+    The refit below is rejected, but `.signal` had already been overwritten with
+    the rejected array while the engine still answered for the old one — so the
+    object described one dataset and scored another.
+    """
+    cost = rpt.CostL2().fit(np.arange(20.0))
+    before_signal = cost.signal
+    before_error = cost.error(0, 20)
+    with pytest.raises(Exception):
+        cost.fit(np.zeros((2, 2, 2)))
+    assert cost.signal is before_signal
+    assert cost.error(0, 20) == before_error
+
+
+def test_multivariate_normal_does_not_score_corrupt_input_as_perfect():
+    """A NaN is not a degenerate distribution.
+
+    The Cholesky refuses a NaN covariance and a singular one alike, and the cost
+    mapped both onto `-inf` — the most attractive score a segment can have, so a
+    detector went looking for the damage. And a NaN outside the segment used to
+    reach it anyway, through the shared prefix, where `ruptures` reduces each
+    segment on its own and returns an ordinary number.
+    """
+    signal = np.arange(20.0).reshape(10, 2)
+    signal[2, 0] = np.nan
+    cost = rpt.CostNormal().fit(signal)
+    assert np.isnan(cost.error(0, 5))
+    assert np.isfinite(cost.error(5, 10))
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: rpt.Window(width=4, jump=2**63).fit(np.arange(10.0)).predict(0),
+        lambda: rpt._ruptures_rs.window_predict(
+            rpt.CostL2().fit(np.arange(10.0))._engine, [], [0.0, 1.0, 0.0], 2, 1, 1, 1
+        ),
+        lambda: rpt._ruptures_rs.CostEngine(np.empty((10, 0)), "linear"),
+        lambda: rpt._ruptures_rs.CostEngine(np.empty((10, 0)), "l2"),
+    ],
+)
+def test_native_boundaries_raise_rather_than_panic(call):
+    """Three of these reach unchecked indexing or overflowing arithmetic.
+
+    A Rust panic crosses `pyo3` as `PanicException`, which inherits from
+    `BaseException` — so `except Exception` does not see it and the caller loses
+    the interpreter instead of getting an error. `call_catching_normal_exceptions`
+    catches only `Exception`, so a panic fails this test rather than passing it.
+    """
+    _, exc = call_catching_normal_exceptions(call)
+    assert exc is None or isinstance(exc, Exception)
+
+
+@pytest.mark.parametrize(
+    "predict",
+    [
+        lambda est: est.predict(n_bkps=1.9),
+        lambda est: est.predict(n_bkps="2"),
+        lambda est: est.predict(n_bkps=None, pen=float("nan")),
+    ],
+)
+def test_a_request_that_cannot_be_meant_is_refused(predict):
+    """`int(1.9)` is 1, which is an answer to a question nobody asked."""
+    estimator = rpt.Binseg().fit(np.arange(100.0))
+    with pytest.raises((TypeError, ValueError)):
+        predict(estimator)
+
+
+def test_a_whole_valued_float_is_still_accepted():
+    """`ruptures` stores these unconverted and lets Python cope, so `2.0` works
+    there. Rejecting a fractional value must not also reject a whole one."""
+    estimator = rpt.Binseg(jump=5.0, min_size=2.0).fit(np.arange(100.0))
+    assert estimator.predict(n_bkps=2.0) == estimator.predict(n_bkps=2)
+
+
+def test_the_memory_limit_is_adjustable_and_refuses_predictably():
+    """A service that takes dimensions from a request needs to say no early.
+
+    Rust aborts the process on a failed allocation, so the refusal has to happen
+    before the allocator sees it. Lowering the ceiling is how that is arranged,
+    and this checks the refusal is an ordinary exception rather than a crash.
+    """
+    original = rpt.get_memory_limit()
+    try:
+        rpt.set_memory_limit(1 << 20)  # 1 MiB
+        with pytest.raises(ValueError, match="limit"):
+            rpt.CostRbf().fit(np.random.default_rng(0).normal(size=4000))
+    finally:
+        rpt.set_memory_limit(original)
+    assert rpt.get_memory_limit() == original
+    # And with the ceiling back, the same call is fine.
+    rpt.CostRbf().fit(np.random.default_rng(0).normal(size=400))
+
+
+def test_asking_for_an_absurd_number_of_breakpoints_is_refused():
+    """The back-pointer tables are unbounded in `n_bkps`, which is the caller's."""
+    signal = np.random.default_rng(0).normal(size=5000)
+    estimator = rpt.Dynp(model="l2", jump=1, min_size=1).fit(signal)
+    _, exc = call_catching_normal_exceptions(lambda: estimator.predict(4_000_000))
+    assert isinstance(exc, Exception)

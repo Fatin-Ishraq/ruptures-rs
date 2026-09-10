@@ -59,7 +59,29 @@ pub fn logdet_spd(a: &mut [f64], d: usize) -> Option<f64> {
 /// for the rank-revealing least-squares solve, mirroring `numpy.linalg.pinv`
 /// and `numpy.linalg.lstsq` on a symmetric matrix.
 pub fn jacobi_eigh(a_in: &[f64], d: usize) -> (Vec<f64>, Vec<f64>) {
-    let mut a = a_in.to_vec();
+    // Work on the matrix divided by its largest entry, and put the scale back
+    // on the eigenvalues at the end. Eigenvectors are unchanged by this and
+    // eigenvalues scale linearly, so it costs nothing — but the convergence
+    // test below sums *squared* entries, and without the normalisation that sum
+    // overflows for a Gram matrix of order 1e160 and underflows to zero for one
+    // of order 1e-200. Both make the loop stop before anything is diagonalised,
+    // and the caller gets the undiagonalised diagonal as its eigenvalues. A
+    // regression design multiplied by 1e80 is not ill conditioned, and it must
+    // not be treated as though it were.
+    let scale = a_in.iter().fold(0.0f64, |m, v| {
+        let x = v.abs();
+        if x > m {
+            x
+        } else {
+            m
+        }
+    });
+    let scale = if scale > 0.0 && scale.is_finite() {
+        scale
+    } else {
+        1.0
+    };
+    let mut a: Vec<f64> = a_in.iter().map(|v| v / scale).collect();
     let mut v = vec![0.0; d * d];
     for i in 0..d {
         v[i * d + i] = 1.0;
@@ -115,8 +137,147 @@ pub fn jacobi_eigh(a_in: &[f64], d: usize) -> (Vec<f64>, Vec<f64>) {
             }
         }
     }
-    let eig = (0..d).map(|i| a[i * d + i]).collect::<Vec<_>>();
+    let eig = (0..d).map(|i| a[i * d + i] * scale).collect::<Vec<_>>();
     (eig, v)
+}
+
+/// Residual sum of squares of `y ~ X` on the rows `start..end`, decided from
+/// the singular values of the design itself rather than from its Gram matrix.
+///
+/// This is the slow, honest path. The normal equations square the condition
+/// number of `X`, which costs the caller its ability to tell a design it cannot
+/// resolve from one that is genuinely rank deficient — and the two have very
+/// different right answers: a real deficiency means NumPy returns no residual
+/// at all (which `ruptures` sums to `0.0`), while an unresolvable-but-full-rank
+/// design has an ordinary residual that simply needs a better factorisation.
+/// Reporting the first when it is the second hands the search a segment that
+/// appears to fit perfectly.
+///
+/// One-sided Jacobi is used because it determines small singular values to high
+/// *relative* accuracy, which is exactly the property being asked for here. The
+/// cost is O(len * p^2) per sweep, so this runs only for the segments whose Gram
+/// could not decide — see [`lstsq_factor`].
+///
+/// `x` is row-major `n x p`, `y` is row-major `n x ny`. Returns `None` when the
+/// design is rank deficient by NumPy's rule.
+pub fn lstsq_residual_svd(
+    x: &[f64],
+    y: &[f64],
+    p: usize,
+    ny: usize,
+    start: usize,
+    end: usize,
+) -> Option<f64> {
+    let m = end - start;
+    if m <= p {
+        return None;
+    }
+    if p == 0 {
+        // Rank 0 of 0 columns is full rank, and the residual is all of y.
+        let mut total = 0.0;
+        for c in 0..ny {
+            let mut acc = crate::prefix::Neumaier::new();
+            for i in start..end {
+                let v = y[i * ny + c];
+                acc.add(v * v);
+            }
+            total += acc.value();
+        }
+        return Some(total);
+    }
+
+    // Column-major copy of the segment's design: the rotations below touch
+    // whole columns, and Jacobi wants them contiguous.
+    let mut cols = vec![0.0f64; m * p];
+    for k in 0..p {
+        for i in 0..m {
+            cols[k * m + i] = x[(start + i) * p + k];
+        }
+    }
+
+    let dot = |cols: &[f64], a: usize, b: usize| -> f64 {
+        let mut acc = 0.0;
+        for i in 0..m {
+            acc += cols[a * m + i] * cols[b * m + i];
+        }
+        acc
+    };
+
+    for _sweep in 0..30 {
+        let mut rotated = false;
+        for a in 0..p {
+            for b in (a + 1)..p {
+                let alpha = dot(&cols, a, a);
+                let beta = dot(&cols, b, b);
+                let gamma = dot(&cols, a, b);
+                if gamma == 0.0 || !gamma.is_finite() {
+                    continue;
+                }
+                if gamma.abs() <= f64::EPSILON * (alpha * beta).sqrt() {
+                    continue;
+                }
+                let zeta = (beta - alpha) / (2.0 * gamma);
+                let t = zeta.signum() / (zeta.abs() + (1.0 + zeta * zeta).sqrt());
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = c * t;
+                for i in 0..m {
+                    let ca = cols[a * m + i];
+                    let cb = cols[b * m + i];
+                    cols[a * m + i] = c * ca - s * cb;
+                    cols[b * m + i] = s * ca + c * cb;
+                }
+                rotated = true;
+            }
+        }
+        if !rotated {
+            break;
+        }
+    }
+
+    // Singular values are the norms of the now-orthogonal columns.
+    let mut sigma = vec![0.0f64; p];
+    for (k, slot) in sigma.iter_mut().enumerate() {
+        *slot = dot(&cols, k, k).sqrt();
+    }
+    let smax = sigma
+        .iter()
+        .fold(0.0f64, |acc, &v| if v > acc { v } else { acc });
+    if smax.is_nan() {
+        return Some(f64::NAN);
+    }
+    if smax <= 0.0 {
+        return None;
+    }
+    // `numpy.linalg.lstsq(rcond=None)`: keep singular values above
+    // `max(m, p) * eps * sigma_max`, and report no residual unless every column
+    // survives.
+    let cutoff = (std::cmp::max(m, p) as f64) * f64::EPSILON * smax;
+    for &sv in &sigma {
+        if sv.is_nan() || sv <= cutoff {
+            return None;
+        }
+    }
+
+    let mut total = 0.0;
+    for c in 0..ny {
+        let mut yy = crate::prefix::Neumaier::new();
+        for i in start..end {
+            let v = y[i * ny + c];
+            yy.add(v * v);
+        }
+        let mut explained = crate::prefix::Neumaier::new();
+        for k in 0..p {
+            let mut proj = 0.0;
+            for i in 0..m {
+                proj += cols[k * m + i] * y[(start + i) * ny + c];
+            }
+            let u = proj / sigma[k];
+            explained.add(u * u);
+        }
+        let rss = yy.value() - explained.value();
+        total += if rss < 0.0 { 0.0 } else { rss };
+    }
+    Some(total)
 }
 
 /// Moore-Penrose pseudo-inverse of a symmetric matrix.
@@ -147,16 +308,36 @@ pub fn pinv_sym(a: &[f64], d: usize) -> Vec<f64> {
 }
 
 /// A factorised normal-equations system, ready to solve for many right-hand
-/// sides, or `None` when NumPy's `lstsq` would report no residual at all.
+/// sides.
 pub struct LstsqFactor {
     eig: Vec<f64>,
     vec: Vec<f64>,
     p: usize,
 }
 
-/// Factorise `X^T X` for a design with `n_rows` rows and `p` columns, deciding
-/// rank the way `numpy.linalg.lstsq(rcond=None)` would — as closely as the
-/// normal equations allow.
+/// What the normal equations were able to establish about a design.
+pub enum Lstsq {
+    /// NumPy returns an empty residual whatever the data is: the system is not
+    /// overdetermined. `ruptures` sums that to `0.0`.
+    NoResidual,
+    /// The Gram matrix cannot tell a rank deficiency from an ill-conditioned
+    /// design, because it has squared away the difference. Ask the design.
+    Unresolvable,
+    /// Well enough conditioned that the fast path is also the accurate one.
+    Ready(LstsqFactor),
+}
+
+/// Below this ratio of smallest to largest eigenvalue, the normal equations
+/// have lost more than half their digits — `eps * cond(X)^2` is then worse than
+/// `1e-4` relative — and the answer, if there is one, has to come from the
+/// design itself.
+///
+/// `eps^(3/4)` puts the boundary at `cond(X)` of roughly `7e5`. Above that
+/// ratio the Gram still delivers four correct digits or better, which is what
+/// buys the O(1) query; below it, correctness is worth O(len * p^2).
+const GRAM_RESOLVABLE: f64 = 1.8e-12;
+
+/// Factorise `X^T X` for a design with `n_rows` rows and `p` columns.
 ///
 /// NumPy returns an *empty* residual array — which `ruptures` then `.sum()`s to
 /// `0.0` — unless the system is strictly overdetermined *and* the design has
@@ -171,22 +352,19 @@ pub struct LstsqFactor {
 /// design of two identical columns, and hands back a residual that is pure
 /// rounding noise.
 ///
-/// So the cutoff is applied to the eigenvalues directly: anything below
-/// `max(n_rows, p) * eps * lambda_max` is unresolvable, and a design that
-/// cannot be certified full rank is reported as deficient. Exact collinearity
-/// is then caught, and the cost is the mirror image — a design whose condition
-/// number exceeds roughly `1 / sqrt(n_rows * eps)`, about `1e7`, is called
-/// deficient here while NumPy still fits it. That boundary is inherent to
-/// solving through the normal equations, and it is documented rather than
-/// hidden.
-pub fn lstsq_factor(gram: &[f64], p: usize, n_rows: usize) -> Option<LstsqFactor> {
+/// So a Gram that cannot decide says so, rather than guessing. It used to guess
+/// "deficient", and a deficient design scores `0.0` — a perfect fit, and the
+/// most attractive segment there is. Now [`Lstsq::Unresolvable`] sends the
+/// caller to [`lstsq_residual_svd`], which factorises the design and applies
+/// NumPy's rule to the singular values NumPy would have seen.
+pub fn lstsq_factor(gram: &[f64], p: usize, n_rows: usize) -> Lstsq {
     if n_rows <= p {
-        return None;
+        return Lstsq::NoResidual;
     }
     if p == 0 {
         // A design with no columns: NumPy reports rank 0 == p, so the residual
         // is the whole of `y^T y`.
-        return Some(LstsqFactor {
+        return Lstsq::Ready(LstsqFactor {
             eig: Vec::new(),
             vec: Vec::new(),
             p: 0,
@@ -194,21 +372,26 @@ pub fn lstsq_factor(gram: &[f64], p: usize, n_rows: usize) -> Option<LstsqFactor
     }
     let (eig, vec) = jacobi_eigh(gram, p);
     let mut lmax = 0.0f64;
+    let mut lmin = f64::INFINITY;
     for &l in &eig {
+        if l.is_nan() {
+            return Lstsq::Unresolvable;
+        }
         if l > lmax {
             lmax = l;
         }
-    }
-    if lmax.is_nan() || lmax <= 0.0 || !lmax.is_finite() {
-        return None;
-    }
-    let cutoff = (std::cmp::max(n_rows, p) as f64) * f64::EPSILON * lmax;
-    for &l in &eig {
-        if l.is_nan() || l <= cutoff {
-            return None; // rank deficient: NumPy yields an empty residual
+        if l < lmin {
+            lmin = l;
         }
     }
-    Some(LstsqFactor { eig, vec, p })
+    if lmax <= 0.0 || !lmax.is_finite() {
+        return Lstsq::Unresolvable;
+    }
+    let cutoff = (std::cmp::max(n_rows, p) as f64) * f64::EPSILON * lmax;
+    if lmin <= cutoff || lmin <= GRAM_RESOLVABLE * lmax {
+        return Lstsq::Unresolvable;
+    }
+    Lstsq::Ready(LstsqFactor { eig, vec, p })
 }
 
 impl LstsqFactor {
@@ -284,12 +467,14 @@ mod tests {
     }
 
     #[test]
-    fn lstsq_rejects_underdetermined_and_rank_deficient() {
-        // 1x1 gram, one row, one column: not overdetermined.
-        assert!(lstsq_factor(&[1.0], 1, 1).is_none());
-        // Exactly collinear 2-column design.
+    fn lstsq_rejects_underdetermined_and_defers_on_collinear() {
+        // 1x1 gram, one row, one column: not overdetermined, and no amount of
+        // looking at the design changes that.
+        assert!(matches!(lstsq_factor(&[1.0], 1, 1), Lstsq::NoResidual));
+        // Exactly collinear 2-column design: the Gram cannot tell this from an
+        // ill-conditioned one, and says so rather than guessing.
         let gram = [1.0, 2.0, 2.0, 4.0];
-        assert!(lstsq_factor(&gram, 2, 50).is_none());
+        assert!(matches!(lstsq_factor(&gram, 2, 50), Lstsq::Unresolvable));
     }
 
     #[test]
@@ -297,10 +482,59 @@ mod tests {
         // Eigenvalues a factor of 1e-7 apart: well inside what the normal
         // equations can resolve, so this is fitted rather than written off.
         let gram = [1.0, 0.0, 0.0, 1e-7];
-        let f = lstsq_factor(&gram, 2, 50).expect("full rank");
+        let f = match lstsq_factor(&gram, 2, 50) {
+            Lstsq::Ready(f) => f,
+            _ => panic!("full rank"),
+        };
         let mut beta = [0.0; 2];
         f.solve_into(&[1.0, 1.0], &mut beta);
         assert!(beta.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn the_eigensolver_is_invariant_under_scaling() {
+        // A well-conditioned matrix at absurd scales: the eigenvalues must
+        // simply scale with it. Before the normalisation, the convergence test
+        // overflowed at the top and underflowed at the bottom, and the solver
+        // returned the undiagonalised diagonal.
+        for scale in [1e80f64, 1e-100, 1.0] {
+            let a = [4.0 * scale, 2.0 * scale, 2.0 * scale, 3.0 * scale];
+            let (mut eig, _) = jacobi_eigh(&a, 2);
+            eig.sort_by(total_cmp);
+            let trace = eig[0] + eig[1];
+            assert!(
+                (trace / (7.0 * scale) - 1.0).abs() < 1e-12,
+                "scale {scale}: {eig:?}"
+            );
+            // Off-diagonal must actually have been eliminated: for this matrix
+            // the eigenvalues are (7 +/- sqrt(17)) / 2 times the scale.
+            let expect = (7.0 - 17.0f64.sqrt()) / 2.0 * scale;
+            assert!((eig[0] / expect - 1.0).abs() < 1e-12, "scale {scale}");
+        }
+    }
+
+    #[test]
+    fn svd_residual_matches_a_hand_computed_fit() {
+        // y = 2 x1 - x2 exactly on a well-conditioned design: zero residual.
+        let n = 20;
+        let mut x = vec![0.0; n * 2];
+        let mut y = vec![0.0; n];
+        for i in 0..n {
+            let a = (i as f64).sin();
+            let b = (i as f64 * 0.37).cos();
+            x[i * 2] = a;
+            x[i * 2 + 1] = b;
+            y[i] = 2.0 * a - b;
+        }
+        let r = lstsq_residual_svd(&x, &y, 2, 1, 0, n).expect("full rank");
+        // `||y||^2` is of order 40 here, so a residual of zero comes back as a
+        // few ulp of that; the point is that it is not of order one.
+        assert!(r < 1e-12, "{r}");
+        // Exactly collinear columns are rank deficient at any scale.
+        for i in 0..n {
+            x[i * 2 + 1] = 3.0 * x[i * 2];
+        }
+        assert!(lstsq_residual_svd(&x, &y, 2, 1, 0, n).is_none());
     }
 
     #[test]

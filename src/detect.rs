@@ -20,6 +20,10 @@
 //!   — `total + (cost + pen)` — because that is how summing the dict's values
 //!   associates, and the alternative differs in the last ulp often enough to
 //!   move a breakpoint on signals with exact ties.
+//!
+//! One divergence is deliberate, and it is in `pelt`: the reference prunes a
+//! candidate at a point from which the pruning inequality does not yet hold,
+//! and so can return a segmentation that is not optimal. See the note there.
 
 use crate::cost::{Cost, KernelBlocks};
 use rayon::prelude::*;
@@ -206,10 +210,33 @@ pub fn dynp(
 
 /// Penalised segmentation with pruning.
 ///
-/// A faithful port, including one quirk: `ruptures` zips `admissible` against
-/// `subproblems` even though `subproblems` skips positions with no recorded
-/// partition, so the two can fall out of step. Reproducing that keeps the
-/// output identical rather than merely defensible.
+/// PELT's pruning rule is that a candidate `t` can be discarded at target `s`
+/// once `F(t) + C(t, s) >= F(s)`, because for any later target `u`
+///
+/// ```text
+/// F(t) + C(t, u) + pen  >=  F(t) + C(t, s) + C(s, u) + pen
+///                       >=  F(s) + C(s, u) + pen
+///                       >=  F(u)
+/// ```
+///
+/// so `t` can never beat what is already known. The last step needs `s` to be a
+/// *legal* last breakpoint for `u` — and with a minimum segment length it is
+/// not, for every `u` closer to `s` than `min_size`. `ruptures` prunes anyway,
+/// and the consequence is not academic: on 24 standard normal samples with
+/// `min_size=6, jump=1, pen=2`, it discards `t = 0` at `s = 21` and then cannot
+/// see the unsplit signal at `u = 24` — returning a segmentation costing
+/// `29.808` when leaving the signal alone costs `29.187`.
+///
+/// The repair keeps the same rule and the same amount of pruning; it only
+/// delays the *removal*. A candidate that fails the test at `s` is marked, and
+/// dropped at the first target `min_size` or more beyond `s`, which is exactly
+/// the point from which the inequality above holds. Every candidate is still
+/// removed once, so the cost of pruning is unchanged.
+///
+/// This makes `Pelt` exact where the reference is not, and the two can
+/// therefore return different answers. When they do, this one's objective is
+/// the smaller — never the other way round, which is what
+/// `tests/test_optimality.py` asserts against an exhaustive search.
 pub fn pelt(cost: &dyn Cost, n: usize, pen: f64, jump: usize, min_size: usize) -> Vec<usize> {
     let jump = jump.max(1);
     let mut totals: HashMap<usize, f64> = HashMap::new();
@@ -222,15 +249,26 @@ pub fn pelt(cost: &dyn Cost, n: usize, pen: f64, jump: usize, min_size: usize) -
     // Admissible positions are kept signed, because `floor((bkp - min_size) /
     // jump) * jump` is negative when the signal is shorter than `min_size` and
     // clamping that to zero would invent a partition `ruptures` does not have.
-    let mut admissible: Vec<isize> = Vec::new();
+    //
+    // The second field is the target at which the candidate failed the pruning
+    // test, if it has: it stays usable until `min_size` past that point.
+    let mut admissible: Vec<(isize, Option<usize>)> = Vec::new();
 
     for &bkp in &ind {
+        admissible.retain(|&(_, pruned_at)| match pruned_at {
+            None => true,
+            Some(s) => bkp - s < min_size,
+        });
         let new_adm = (bkp as isize - min_size as isize).div_euclid(jump as isize) * jump as isize;
-        admissible.push(new_adm);
+        admissible.push((new_adm, None));
 
-        // (total, t) for every admissible t that has a recorded partition
-        let mut subproblems: Vec<(f64, usize)> = Vec::with_capacity(admissible.len());
-        for &t in &admissible {
+        // (total, t, slot) for every admissible t that has a recorded partition.
+        // The slot is carried so the pruning decision lands on the candidate it
+        // was computed for; `ruptures` zips the two lists positionally even
+        // though one of them skips entries, which is a misalignment waiting for
+        // the right parameters.
+        let mut subproblems: Vec<(f64, usize, usize)> = Vec::with_capacity(admissible.len());
+        for (slot, &(t, _)) in admissible.iter().enumerate() {
             if t < 0 {
                 continue;
             }
@@ -239,7 +277,7 @@ pub fn pelt(cost: &dyn Cost, n: usize, pen: f64, jump: usize, min_size: usize) -
                 // `total + (cost + pen)`, matching how Python sums the
                 // partition dict: one `cost + pen` term per segment, added
                 // left to right.
-                subproblems.push((tot + (cost.error(t, bkp) + pen), t));
+                subproblems.push((tot + (cost.error(t, bkp) + pen), t, slot));
             }
         }
         if subproblems.is_empty() {
@@ -255,12 +293,22 @@ pub fn pelt(cost: &dyn Cost, n: usize, pen: f64, jump: usize, min_size: usize) -
         totals.insert(bkp, best.0);
         prev.insert(bkp, best.1);
 
-        // pruning, zipped positionally exactly as ruptures does
+        // A position below `min_size` never receives a partition of its own, so
+        // it can never contribute and is dropped outright. Everything else is
+        // marked rather than removed.
         let cutoff = best.0 + pen;
-        let mut kept: Vec<isize> = Vec::with_capacity(admissible.len());
-        for (t, sp) in admissible.iter().zip(subproblems.iter()) {
-            if sp.0 <= cutoff {
-                kept.push(*t);
+        let mut verdict: Vec<Option<bool>> = vec![None; admissible.len()];
+        for &(value, _, slot) in &subproblems {
+            verdict[slot] = Some(value <= cutoff);
+        }
+        let mut kept: Vec<(isize, Option<usize>)> = Vec::with_capacity(admissible.len());
+        for (slot, &(t, pruned_at)) in admissible.iter().enumerate() {
+            match verdict[slot] {
+                None => continue,
+                Some(true) => kept.push((t, pruned_at)),
+                // Keep the *earliest* failure: the candidate becomes droppable
+                // sooner, and the inequality holds from that point on.
+                Some(false) => kept.push((t, pruned_at.or(Some(bkp)))),
             }
         }
         admissible = kept;
@@ -673,6 +721,13 @@ fn argrelmax_wrap(data: &[f64], order: usize) -> Vec<usize> {
     if m == 0 {
         return Vec::new();
     }
+    // With `mode="wrap"`, a shift of `m` compares a point against itself, and
+    // `data[i] > data[i]` is false — so an order that reaches all the way round
+    // has no strict maxima at all. Returning that directly also keeps the loop
+    // below from running `order` times per point when `order` is enormous.
+    if order >= m {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for i in 0..m {
         let mut is_max = true;
@@ -733,7 +788,14 @@ pub fn window_seg(
     let jump = jump.max(1);
     let mut bkps = vec![n];
     let mut error = cost.sum_of_costs(&bkps);
-    let order = std::cmp::max(std::cmp::max(width, 2 * min_size) / (2 * jump), 1);
+    // Saturating throughout. `jump` reaches here as whatever the caller put in
+    // the constructor, and `Window(width=4, jump=2**63)` overflowed `2 * jump`
+    // to zero in release mode — a division by zero, which is a panic, which
+    // crosses the FFI boundary as something `except Exception` cannot catch.
+    let order = std::cmp::max(
+        std::cmp::max(width, min_size.saturating_mul(2)) / jump.saturating_mul(2).max(1),
+        1,
+    );
     let peaks = argrelmax_wrap(score, order);
     if peaks.is_empty() {
         return bkps;

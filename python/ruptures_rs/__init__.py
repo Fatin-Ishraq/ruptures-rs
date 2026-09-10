@@ -14,10 +14,18 @@ Beyond parity it adds :class:`Crops`, which recovers *every* segmentation that
 is optimal for some penalty in a range, together with the exact penalty
 interval each one owns. `ruptures` has no equivalent, and it removes the need
 to guess a penalty or sweep a grid.
+
+A failed allocation in Rust aborts the process rather than raising, so every
+structure whose size depends on the input is measured against a ceiling first
+and refused with an ordinary exception. :func:`set_memory_limit` and
+:func:`get_memory_limit` move that ceiling, as does the
+``RUPTURES_RS_MEMORY_LIMIT_GIB`` environment variable; lowering it is how a
+service that takes signal dimensions from a request declines hostile ones at its
+own boundary.
 """
 
 from . import base, costs, crops, datasets, detection, exceptions, metrics, show, utils, version
-from ._ruptures_rs import __version__
+from ._ruptures_rs import __version__, get_memory_limit, set_memory_limit
 from .costs import (
     CostAR,
     CostCLinear,
@@ -176,5 +184,7 @@ __all__ = [
     "utils",
     "version",
     "install",
+    "get_memory_limit",
+    "set_memory_limit",
     "__version__",
 ]
